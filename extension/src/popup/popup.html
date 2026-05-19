@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Săn Vé Pro</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 280px;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: -apple-system, "Segoe UI", sans-serif;
+    font-size: 13px;
+  }
+  .header {
+    background: #111827;
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid #1e293b;
+  }
+  .header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    color: #fbbf24;
+    letter-spacing: 0.3px;
+  }
+  .header .sub {
+    font-size: 11px;
+    color: #64748b;
+    margin-top: 2px;
+  }
+  .body { padding: 14px 16px; }
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    background: #111827;
+    border-radius: 8px;
+    border: 1px solid #1e293b;
+  }
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #4b5563;
+  }
+  .dot.online { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.2); }
+  .dot.offline { background: #ef4444; }
+  .status-text { flex: 1; font-size: 12px; color: #94a3b8; }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .toggle-label { font-weight: 500; color: #e2e8f0; }
+  .toggle {
+    position: relative;
+    width: 40px; height: 22px;
+  }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0;
+    background: #374151;
+    border-radius: 22px;
+    cursor: pointer;
+    transition: background .2s;
+  }
+  .slider:before {
+    content: "";
+    position: absolute;
+    width: 16px; height: 16px;
+    left: 3px; bottom: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform .2s;
+  }
+  input:checked + .slider { background: #22c55e; }
+  input:checked + .slider:before { transform: translateX(18px); }
+
+  .config-box {
+    background: #111827;
+    border: 1px solid #1e293b;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    font-size: 12px;
+  }
+  .config-box .row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+    color: #64748b;
+  }
+  .config-box .row:last-child { margin-bottom: 0; }
+  .config-box .val { color: #e2e8f0; font-weight: 500; }
+
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 9px;
+    border: none;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity .15s;
+    margin-bottom: 6px;
+  }
+  .btn:hover { opacity: .85; }
+  .btn-primary { background: #1d4ed8; color: #fff; }
+  .btn-secondary { background: #1e293b; color: #94a3b8; }
+  .btn-run { background: #065f46; color: #6ee7b7; }
+
+  .footer {
+    padding: 8px 16px 12px;
+    text-align: center;
+    font-size: 11px;
+    color: #334155;
+  }
+  .log-box {
+    background: #0d1117;
+    border: 1px solid #1e293b;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 11px;
+    font-family: monospace;
+    color: #64748b;
+    max-height: 80px;
+    overflow-y: auto;
+    margin-bottom: 10px;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🎫 Săn Vé Pro</h1>
+  <div class="sub" id="sub-text">v2.0.0 — Đang kiểm tra App...</div>
+</div>
+<div class="body">
+
+  <div class="status-row">
+    <div class="dot" id="app-dot"></div>
+    <div class="status-text" id="app-status">Đang kết nối Desktop App...</div>
+  </div>
+
+  <div class="toggle-row">
+    <span class="toggle-label">Bot tự động</span>
+    <label class="toggle">
+      <input type="checkbox" id="bot-toggle">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="config-box" id="config-box">
+    <div class="row"><span>Platform</span><span class="val" id="cfg-platform">—</span></div>
+    <div class="row"><span>Mode</span><span class="val" id="cfg-mode">—</span></div>
+    <div class="row"><span>Ưu tiên</span><span class="val" id="cfg-zones">—</span></div>
+    <div class="row"><span>Số lượng</span><span class="val" id="cfg-qty">—</span></div>
+  </div>
+
+  <div class="log-box" id="log-box">Chờ hoạt động...</div>
+
+  <button class="btn btn-run" id="btn-run">▶ Chọn vé ngay (tab hiện tại)</button>
+  <button class="btn" id="btn-hunt" style="background:#7c3aed;color:#ede9fe;margin-bottom:6px">🏹 Săn vé (Hunt + chọn tự động)</button>
+  <button class="btn" id="btn-stop-hunt" style="background:#7f1d1d;color:#fca5a5;margin-bottom:6px">⏹ Dừng Hunt</button>
+  <button class="btn btn-secondary" id="btn-open-app">⚙ Mở Desktop App</button>
+
+</div>
+<div class="footer">Port 9279 · Extension + App</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

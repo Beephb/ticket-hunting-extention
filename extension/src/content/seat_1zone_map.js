@@ -1,0 +1,412 @@
+// src/content/seat_1zone_map.js
+// 1Zone seat_map — port từ seat_selector_1zone.py
+// Flow: GET /tickets API → parse ghế → Seats.io native API (window.seatsio.charts[0])
+// KHÔNG POST add-to-cart trực tiếp — click button UI để frontend tự sinh token
+
+const API_BASE_1Z = "https://prod.1zone.vn/ticketing/api";
+
+// ── Tickets API ───────────────────────────────────────────────────────────────
+
+async function get1ZoneTickets(eventId, calendarId) {
+  const url = `${API_BASE_1Z}/v4/event/${eventId}/tickets?calendarId=${encodeURIComponent(calendarId)}`;
+  const res = await fetch(url, {
+    credentials: "include",
+    headers: { "Accept": "application/json", "x-accept-language": "vi" },
+    signal: AbortSignal.timeout(6000),
+  });
+  if (!res.ok) throw new Error(`tickets API ${res.status}`);
+  return res.json();
+}
+
+// ── Parse tickets từ API response ────────────────────────────────────────────
+
+function extractTickets(data) {
+  let arr = [];
+  if (Array.isArray(data)) arr = data;
+  else if (data && typeof data === "object") {
+    arr = data.data || data.result || data.tickets || [];
+  }
+  const tickets = [];
+  for (const x of arr) {
+    if (!x || typeof x !== "object") continue;
+    const ticketId  = String(x._id || x.id || "").trim();
+    const zoneId    = String(x.zoneId || "").trim();
+    const zoneName  = String(x.zoneName || "").trim();
+    const tcId      = String(x.ticketClassId || "").trim();
+    const tcName    = String(x.ticketClassName || zoneName || "").trim();
+    const row       = String(x.rowName || "").trim().toUpperCase();
+    const code      = String(x.code || x.label || "").trim();
+    if (!ticketId || !zoneId || !tcId || !row || !code) continue;
+    const codeNum = parseInt(code.replace(/\D+/g, "")) || 0;
+    tickets.push({
+      _id: ticketId, zoneId, zoneName, ticketClassId: tcId, ticketClassName: tcName,
+      rowName: row, code, codeNum,
+      label: `${row}-${code}`,
+      objectId: `${zoneName}-${row}-${code}`,
+    });
+  }
+  return tickets;
+}
+
+// ── Priority parser ───────────────────────────────────────────────────────────
+
+function normStr(s) {
+  return String(s || "").trim().toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ").trim();
+}
+
+function parseRowRange(part) {
+  part = String(part || "").trim().toUpperCase().replace(/\s/g, "");
+  const rows = [];
+  const add = r => { r = String(r).trim().toUpperCase(); if (r && !rows.includes(r)) rows.push(r); };
+  for (const token of part.split(",")) {
+    if (!token) continue;
+    const pieces = token.split("-").filter(Boolean);
+    if (pieces.length === 2 && /^[A-Z]$/.test(pieces[0]) && /^[A-Z]$/.test(pieces[1])) {
+      const a = pieces[0].charCodeAt(0), b = pieces[1].charCodeAt(0);
+      const step = a <= b ? 1 : -1;
+      for (let i = a; step > 0 ? i <= b : i >= b; i += step) add(String.fromCharCode(i));
+    } else {
+      pieces.forEach(add);
+    }
+  }
+  return rows;
+}
+
+function parseNumSpec(part) {
+  part = String(part || "").replace(/\s/g, "");
+  const ranges = [], values = new Set(), order = [];
+  const add = n => { values.add(n); if (!order.includes(n)) order.push(n); };
+  for (const token of part.split(",")) {
+    const m = token.match(/^(\d+)-(\d+)$/);
+    if (m) {
+      const a = parseInt(m[1]), b = parseInt(m[2]);
+      ranges.push([Math.min(a,b), Math.max(a,b)]);
+      const step = a <= b ? 1 : -1;
+      for (let n = a; step > 0 ? n <= b : n >= b; n += step) add(n);
+    } else if (/^\d+$/.test(token)) add(parseInt(token));
+  }
+  return { ranges, values, order };
+}
+
+function numAllowed(num, spec) {
+  if (!spec) return true;
+  const { ranges, values } = spec;
+  if (!ranges.length && !values.size) return true;
+  if (values.has(num)) return true;
+  return ranges.some(([lo,hi]) => num >= lo && num <= hi);
+}
+
+function parsePriority1Zone(raw) {
+  raw = String(raw || "").trim();
+  if (!raw) return { type: "empty", raw };
+  const compact = raw.toUpperCase().replace(/\s/g, "");
+
+  if (compact.includes(":")) {
+    const [left, right] = compact.split(":", 2);
+    const rows = parseRowRange(left);
+    const numSpec = parseNumSpec(right);
+    if (rows.length && (numSpec.ranges.length || numSpec.values.size))
+      return { type: "range", raw, rows, numSpec };
+  }
+
+  const exact = [];
+  let okExact = true;
+  for (const token of compact.split(",")) {
+    if (!token) continue;
+    const m = token.match(/^([A-Z]+)-?(\d+)$/);
+    if (!m) { okExact = false; break; }
+    exact.push({ row: m[1], num: parseInt(m[2]), label: `${m[1]}-${parseInt(m[2])}` });
+  }
+  if (exact.length && okExact) return { type: "exact", raw, seats: exact };
+
+  return { type: "text", raw, norm: normStr(raw) };
+}
+
+// ── Adjacent picker ───────────────────────────────────────────────────────────
+
+function pickAdjacent(tickets, quantity, numOrder) {
+  const grouped = {};
+  for (const t of tickets) {
+    const key = `${t.zoneId}|${t.ticketClassId}|${t.rowName}`;
+    (grouped[key] = grouped[key] || []).push(t);
+  }
+
+  const numRank = n => {
+    if (!numOrder || !numOrder.length) return 999999;
+    const i = numOrder.indexOf(n);
+    return i >= 0 ? i : 999999;
+  };
+
+  for (const group of Object.values(grouped)) {
+    if (group.length < quantity) continue;
+    const byNum = {};
+    for (const t of group) byNum[t.codeNum] = t;
+    const nums = Object.keys(byNum).map(Number).sort((a,b) => a-b);
+
+    // Parity groups (bước 2)
+    for (const start of nums) {
+      const up = Array.from({length: quantity}, (_, i) => start + 2*i);
+      if (up.every(n => byNum[n])) return up.map(n => byNum[n]);
+      const down = Array.from({length: quantity}, (_, i) => start - 2*i);
+      if (down.every(n => byNum[n])) return down.map(n => byNum[n]);
+    }
+    // Sequential fallback
+    for (const start of nums) {
+      const up = Array.from({length: quantity}, (_, i) => start + i);
+      if (up.every(n => byNum[n])) return up.map(n => byNum[n]);
+    }
+  }
+  return [];
+}
+
+// ── Select tickets theo priority ──────────────────────────────────────────────
+
+function selectTickets(tickets, priorities, quantity, requireAdjacent = true, allowSplit = false) {
+  for (const raw of priorities) {
+    const parsed = parsePriority1Zone(raw);
+    if (parsed.type === "empty") continue;
+
+    if (parsed.type === "exact") {
+      const selected = [];
+      for (const want of parsed.seats) {
+        const found = tickets.find(t => t.rowName === want.row && t.codeNum === want.num);
+        if (!found) break;
+        selected.push(found);
+      }
+      if (selected.length >= quantity) return { selected: selected.slice(0, quantity), reason: `exact:${raw}` };
+      continue;
+    }
+
+    if (parsed.type === "range") {
+      const allowedRows = new Set(parsed.rows);
+      const candidates = tickets.filter(t =>
+        allowedRows.has(t.rowName) && numAllowed(t.codeNum, parsed.numSpec)
+      );
+      if (candidates.length < quantity) continue;
+
+      for (const row of parsed.rows) {
+        const rowTickets = candidates.filter(t => t.rowName === row)
+          .sort((a,b) => a.codeNum - b.codeNum);
+        if (rowTickets.length < quantity) continue;
+        if (requireAdjacent) {
+          const adj = pickAdjacent(rowTickets, quantity, parsed.numSpec?.order);
+          if (adj.length >= quantity) return { selected: adj.slice(0,quantity), reason: `adj-range:${raw}` };
+          if (!allowSplit) continue;
+        }
+        return { selected: rowTickets.slice(0,quantity), reason: `range:${raw}` };
+      }
+      continue;
+    }
+
+    // Text match
+    const norm = parsed.norm;
+    const candidates = tickets.filter(t => {
+      const hay = [t.zoneName, t.ticketClassName, t.label, t.objectId]
+        .map(normStr).join(" ");
+      return hay.includes(norm) || norm.includes(hay.split(" ")[0]);
+    }).sort((a,b) => a.codeNum - b.codeNum);
+
+    if (candidates.length < quantity) continue;
+    if (requireAdjacent) {
+      const adj = pickAdjacent(candidates, quantity, []);
+      if (adj.length >= quantity) return { selected: adj.slice(0,quantity), reason: `adj-text:${raw}` };
+      if (!allowSplit) continue;
+    }
+    return { selected: candidates.slice(0,quantity), reason: `text:${raw}` };
+  }
+  return { selected: [], reason: "no match" };
+}
+
+// ── Label variants (như Python _label_variants_1zone) ─────────────────────────
+
+function labelVariants(seat) {
+  const row = String(seat.rowName || "").toUpperCase().trim();
+  const code = String(seat.code || seat.codeNum || "").trim();
+  const zone = String(seat.zoneName || "").trim();
+  const tc   = String(seat.ticketClassName || "").trim();
+  const label = row && code ? `${row}-${code}` : String(seat.label || "").trim();
+  const compact = row && code ? `${row}${code}` : "";
+  const objectId = String(seat.objectId || "").trim();
+
+  const variants = [];
+  for (const x of [objectId, zone && label ? `${zone}-${label}` : "", tc && label ? `${tc}-${label}` : "", label, compact]) {
+    const s = String(x || "").trim();
+    if (s && !variants.includes(s)) variants.push(s);
+  }
+  return variants;
+}
+
+// ── Seats.io select qua runInPage ─────────────────────────────────────────────
+
+async function seatsioSelectGroup(labelGroups, expectedCount) {
+  return runInPage(function(args) {
+    const { labelGroups, expectedCount } = args;
+
+    async function mp(v) { return v && typeof v.then === "function" ? await v : v; }
+    function simpleErr(e) { try { return String(e?.message || e).slice(0,200); } catch(_) { return "err"; } }
+
+    return (async () => {
+      const logs = [];
+      const chart = window.seatsio?.charts?.[0];
+      if (!chart) return { ok: false, error: "no seatsio chart", logs, selectedCount: 0 };
+
+      logs.push(`chart found | trySelectObjects=${typeof chart.trySelectObjects}`);
+
+      try { await mp(chart.clearSelection()); logs.push("clearSelection OK"); } catch(e) { logs.push("clearSelection err: " + simpleErr(e)); }
+
+      async function getSelected() {
+        try {
+          const sel = await mp(chart.listSelectedObjects()) || [];
+          return sel.length;
+        } catch { return 0; }
+      }
+
+      const picked = [];
+      for (let i = 0; i < labelGroups.length; i++) {
+        const variants = labelGroups[i];
+        let ok = false;
+        logs.push(`seat ${i+1} variants: ${variants.join(" | ")}`);
+        for (const label of variants) {
+          if (ok) break;
+          for (const method of ["trySelectObjects", "selectObjects"]) {
+            if (ok || typeof chart[method] !== "function") continue;
+            try {
+              await mp(chart[method]([label]));
+              logs.push(`${method} OK: ${label}`);
+              picked.push(label);
+              ok = true;
+            } catch(e) { logs.push(`${method} fail ${label}: ${simpleErr(e)}`); }
+          }
+        }
+        if (!ok) {
+          const cnt = await getSelected();
+          return { ok: false, error: `seat ${i+1} failed`, logs, selectedCount: cnt, pickedLabels: picked };
+        }
+      }
+
+      const cnt = await getSelected();
+      const success = expectedCount ? cnt >= expectedCount : picked.length === labelGroups.length;
+      return { ok: success, logs, selectedCount: cnt, pickedLabels: picked };
+    })();
+  }, { labelGroups, expectedCount });
+}
+
+// ── Click nút thanh toán sau khi chọn ghế ────────────────────────────────────
+
+async function click1ZonePaymentBtn() {
+  const btns = Array.from(document.querySelectorAll("button, a[role='button'], [role='button']"));
+  const payBtn = btns.find(b => {
+    if (b.disabled || b.getAttribute("aria-disabled") === "true") return false;
+    const txt = (b.innerText || "").toLowerCase();
+    return /thanh toán|tiếp tục|đặt vé|mua vé|checkout|continue/.test(txt);
+  });
+  if (!payBtn) return false;
+  payBtn.click();
+  return true;
+}
+
+// ── Main flow: 1Zone seat_map ─────────────────────────────────────────────────
+
+async function run1ZoneSeatMap(cfg) {
+  const aseat = cfg.auto_seat || {};
+  const priorities = aseat.zone_priority || aseat.priority_targets || [];
+  const quantity = parseInt(aseat.quantity) || 1;
+  const requireAdjacent = aseat.require_adjacent !== false;
+  const allowSplit = !!aseat.allow_split_seats;
+
+  svpLog(`🗺️ 1Zone seat_map | priority=${priorities.join(",")} | SL=${quantity}`, "blue");
+
+  const info = extract1ZoneInfo();
+  if (!info.eventId || !info.calendarId) {
+    svpLog("❌ Không lấy được eventId/calendarId", "red");
+    return false;
+  }
+
+  // GET tickets API
+  svpLog("📡 GET tickets API...", "blue");
+  let tickets = [];
+  try {
+    const data = await get1ZoneTickets(info.eventId, info.calendarId);
+    tickets = extractTickets(data);
+    svpLog(`📋 Tickets available: ${tickets.length}`, "blue");
+  } catch(e) {
+    svpLog(`❌ Tickets API lỗi: ${e.message}`, "red");
+    return false;
+  }
+
+  if (!tickets.length) {
+    svpLog("❌ Không có ghế nào available", "red");
+    return false;
+  }
+
+  // Log tóm tắt theo zone
+  const zoneSummary = {};
+  for (const t of tickets) {
+    zoneSummary[t.zoneName] = (zoneSummary[t.zoneName] || 0) + 1;
+  }
+  svpLog(`📋 Zones: ${Object.entries(zoneSummary).map(([k,v]) => `${k}(${v})`).join(", ")}`, "blue");
+
+  // API chỉ dùng để shortlist nhanh. Seats.io mới là bước chọn thật.
+  // Nếu API báo còn nhưng Seats.io không chọn được (Ignoring/hết),
+  // bỏ ghế đó và thử candidate tiếp theo — giống Python _run_seatmap_api
+
+  let remaining = [...tickets];
+  const triedIds = new Set();
+  const maxAttempts = Math.min(30, Math.max(1, tickets.length));
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { selected, reason } = selectTickets(remaining, priorities, quantity, requireAdjacent, allowSplit);
+
+    if (selected.length < quantity) {
+      svpLog("❌ Không tìm đủ ghế theo ưu tiên. Không chọn bừa ngoài danh sách.", "red");
+      return false;
+    }
+
+    const labels = selected.map(t => `${t.zoneName} ${t.label}`);
+    svpLog(`🎯 Thử chọn ghế lần ${attempt} (${reason}): ${labels.join(", ")}`, "green");
+
+    // Build label groups và thử Seats.io select
+    const labelGroups = selected.map(labelVariants);
+    svpLog(`🪑 Seats.io select: ${labelGroups.map(g => g[0]).join(", ")}`, "blue");
+
+    let seatsRes;
+    try {
+      seatsRes = await seatsioSelectGroup(labelGroups, quantity);
+    } catch(e) {
+      svpLog(`❌ Seats.io error: ${e.message}`, "red");
+      seatsRes = { ok: false, error: e.message };
+    }
+
+    for (const line of (seatsRes?.logs || []).slice(0, 15)) {
+      svpLog(`🧪 Seats.io: ${line}`, "blue");
+    }
+
+    if (seatsRes?.ok) {
+      svpLog(`✅ Seats.io đã chọn ${seatsRes.selectedCount}/${quantity} ghế`, "green");
+      await sleep(800);
+
+      // Click Thanh toán
+      svpLog("🖱️ Click Thanh toán", "blue");
+      const clicked = await click1ZonePaymentBtn();
+      if (!clicked) svpLog("⚠️ Không tìm thấy nút Thanh toán", "yellow");
+      await sleep(1000);
+      svpLog("✅ Đã click Thanh toán — chờ checkout...", "green");
+      return true;
+    }
+
+    // Seats.io fail → bỏ ghế này, thử tiếp
+    const failedIds = new Set(selected.map(t => t._id).filter(Boolean));
+    if (!failedIds.size || [...failedIds].every(id => triedIds.has(id))) {
+      svpLog("❌ Seats.io không chọn được và không còn candidate mới.", "red");
+      return false;
+    }
+    failedIds.forEach(id => triedIds.add(id));
+    remaining = remaining.filter(t => !triedIds.has(t._id));
+    svpLog(`↪️ Bỏ qua ghế không select được, thử tiếp. Đã loại ${triedIds.size} ghế.`, "yellow");
+  }
+
+  svpLog("❌ Thử nhiều candidate nhưng chưa chọn được ghế trên Seats.io.", "red");
+  return false;
+}
