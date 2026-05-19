@@ -1,0 +1,21 @@
+{
+  "name": "Nguyễn Mạnh Cường",
+  "phone": "0374234397",
+  "email": "manhcuong.1561996@gmail.com",
+  "address": "biên hòa",
+  "auto_seat": {
+    "enabled": false,
+    "platform": "Ticketbox",
+    "seat_mode": "seat_map",
+    "zone_priority": [
+      "L:21"
+    ],
+    "quantity": 1,
+    "seat_number_mode": "auto",
+    "require_adjacent": false,
+    "allow_split_seats": true,
+    "priority_targets": [
+      "L:21"
+    ]
+  }
+}
