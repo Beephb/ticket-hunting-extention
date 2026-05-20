@@ -23,6 +23,21 @@
     "type": "module"
   },
 
+  "commands": {
+    "hunt": {
+      "suggested_key": { "default": "Alt+1" },
+      "description": "Hunt vé"
+    },
+    "select_seat": {
+      "suggested_key": { "default": "Alt+2" },
+      "description": "Chọn ghế"
+    },
+    "fill_form": {
+      "suggested_key": { "default": "Alt+3" },
+      "description": "Điền form"
+    }
+  },
+
   "action": {
     "default_popup": "src/popup/popup.html",
     "default_title": "Săn Vé Pro"

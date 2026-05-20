@@ -216,6 +216,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   sendResponse({ ok: false });
 });
 
+// ── Keyboard commands ─────────────────────────────────────────────────────────
+
+chrome.commands.onCommand.addListener(async (command) => {
+  const tabs = await chrome.tabs.query({
+    active: true, currentWindow: true,
+    url: ["https://ticket.1zone.vn/*", "https://ticketbox.vn/*"]
+  });
+  const tab = tabs[0];
+  if (!tab) return;
+
+  if (command === "hunt") {
+    chrome.tabs.sendMessage(tab.id, { type: "HUNT_ONLY" }).catch(() => {});
+  } else if (command === "select_seat") {
+    chrome.tabs.sendMessage(tab.id, { type: "RUN_NOW" }).catch(() => {});
+  } else if (command === "fill_form") {
+    chrome.tabs.sendMessage(tab.id, { type: "FILL_FORM_NOW" }).catch(() => {});
+  }
+});
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 pollConfig();

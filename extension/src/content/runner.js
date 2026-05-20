@@ -5,6 +5,9 @@ if (window.__SVP_INJECTED__) {
 } else {
 window.__SVP_INJECTED__ = true;
 
+const _HUNT_FLAG_KEY = "__svp_hunt_done__";
+const _HUNT_FLAG_TTL = 30000; // 30 giây
+
 let _cfg = null;
 let _enabled = false;
 let _running = false;
@@ -22,6 +25,20 @@ async function initConfig() {
       resolve(_cfg);
     });
   });
+}
+
+// ── Hunt flag (sessionStorage + TTL 30s) ─────────────────────────────────────
+
+function setHuntFlag() {
+  sessionStorage.setItem(_HUNT_FLAG_KEY, String(Date.now()));
+}
+
+function checkAndClearHuntFlag() {
+  const val = sessionStorage.getItem(_HUNT_FLAG_KEY);
+  if (!val) return false;
+  const age = Date.now() - parseInt(val);
+  sessionStorage.removeItem(_HUNT_FLAG_KEY);
+  return age < _HUNT_FLAG_TTL;
 }
 
 // ── Message listener ──────────────────────────────────────────────────────────
@@ -50,8 +67,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
   if (msg.type === "HUNT_NOW") {
-    if (!_cfg) { initConfig().then(() => startHunt()); }
-    else startHunt();
+    if (!_cfg) { initConfig().then(() => startHunt(true)); }
+    else startHunt(true);
+    sendResponse({ ok: true });
+    return;
+  }
+  if (msg.type === "HUNT_ONLY") {
+    if (!_cfg) { initConfig().then(() => startHunt(false)); }
+    else startHunt(false);
+    sendResponse({ ok: true });
+    return;
+  }
+  if (msg.type === "FILL_FORM_NOW") {
+    if (!_cfg) { initConfig().then(() => runFillForm()); }
+    else runFillForm();
     sendResponse({ ok: true });
     return;
   }
@@ -66,20 +95,37 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   sendResponse({ ok: false });
 });
 
+// ── Fill form thủ công ────────────────────────────────────────────────────────
+
+async function runFillForm() {
+  if (_running) { svpLog("⏳ Đang chạy, bỏ qua", "gray"); return; }
+  if (!_cfg) { svpLog("❌ Chưa có config", "red"); return; }
+  _running = true;
+  try {
+    await autoFillForm(_cfg);
+  } catch(e) {
+    svpLog(`❌ Fill form lỗi: ${e.message}`, "red");
+  } finally {
+    _running = false;
+  }
+}
+
 // ── Hunt ─────────────────────────────────────────────────────────────────────
 
-async function startHunt() {
+async function startHunt(autoSeat = true) {
   if (_running) { svpLog("⏳ Đang chạy, bỏ qua", "gray"); return; }
   if (!_cfg) { svpLog("❌ Chưa có config", "red"); return; }
   const platform = detectPlatform();
   if (!platform) { svpLog("⚠️ Không phải trang 1Zone/Ticketbox", "yellow"); return; }
   _running = true;
-  svpLog(`🏹 Bắt đầu Hunt: ${platform}`, "blue");
+  svpLog(`🏹 Bắt đầu Hunt: ${platform}${autoSeat ? " (+ auto chọn ghế)" : " (chỉ hunt)"}`, "blue");
   try {
+    if (autoSeat) setHuntFlag();
     if (platform === "1Zone") await hunt1Zone(_cfg);
     else if (platform === "Ticketbox") await huntTicketbox(_cfg);
   } catch (e) {
     svpLog(`❌ Hunt lỗi: ${e.message}`, "red");
+    if (autoSeat) sessionStorage.removeItem(_HUNT_FLAG_KEY);
   } finally {
     _running = false;
   }
@@ -125,7 +171,7 @@ async function maybeRun(force = false) {
   }
 
   _running = true;
-  await sleep(800); // giảm từ 1500 xuống 800 vì inject sau DOM ready
+  await sleep(800);
   try {
     svpLog(`🪑 Route: ${platform} + ${mode}`, "blue");
     if (platform === "1Zone" && mode === "seat_zone") await run1ZoneSeatZone(_cfg);
@@ -162,6 +208,16 @@ function watchNavigation() {
   svpLog(`✅ Săn Vé Pro v${SVP_VERSION} injected`, "green");
   await initConfig();
   watchNavigation();
+
+  // Kiểm tra hunt flag — nếu vừa hunt xong thì tự chạy seat dù enabled=false
+  const huntDone = checkAndClearHuntFlag();
+  if (huntDone) {
+    svpLog("🎯 Hunt flag detected — tự động chạy seat selector...", "green");
+    await sleep(1000);
+    await maybeRun(true);
+    return;
+  }
+
   if (_enabled) {
     svpLog("🟢 Bot đang bật, check trang...", "green");
     await sleep(800);

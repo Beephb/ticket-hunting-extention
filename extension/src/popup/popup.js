@@ -66,41 +66,39 @@ async function init() {
     }
   });
 
-  // Chạy ngay tab hiện tại
-  document.getElementById("btn-run").addEventListener("click", async () => {
-    addLog("▶ Gửi lệnh chạy ngay...");
+  // Helper gửi message tới tab hiện tại
+  async function sendToTab(type, label) {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab) {
-      chrome.tabs.sendMessage(tab.id, { type: "RUN_NOW" }).catch(() => {
-        addLog("❌ Tab chưa load content script (hãy mở trang 1Zone/Ticketbox)");
+      chrome.tabs.sendMessage(tab.id, { type }).catch(() => {
+        addLog(`❌ Tab chưa load content script`);
       });
-      addLog("✅ Đã gửi RUN_NOW");
+      addLog(`✅ ${label}`);
     }
-  });
+  }
 
-  // Hunt
-  document.getElementById("btn-hunt").addEventListener("click", async () => {
-    addLog("🏹 Bắt đầu Hunt...");
+  // Alt+2: Chọn ghế ngay
+  document.getElementById("btn-run").addEventListener("click", () => sendToTab("RUN_NOW", "Gửi lệnh chọn ghế"));
+
+  // Alt+1: Hunt + chọn tự động
+  document.getElementById("btn-hunt").addEventListener("click", () => sendToTab("HUNT_NOW", "Bắt đầu Hunt + auto chọn ghế"));
+
+  // Chỉ Hunt (không set flag auto seat)
+  document.getElementById("btn-hunt-only").addEventListener("click", async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab) {
-      chrome.tabs.sendMessage(tab.id, { type: "HUNT_NOW" }).catch(() => {
+      chrome.tabs.sendMessage(tab.id, { type: "HUNT_ONLY" }).catch(() => {
         addLog("❌ Tab chưa load content script");
       });
-      addLog("✅ Đã gửi HUNT_NOW");
+      addLog("✅ Bắt đầu Hunt (chỉ navigate, không chọn ghế)");
     }
   });
 
+  // Alt+3: Điền form
+  document.getElementById("btn-fill").addEventListener("click", () => sendToTab("FILL_FORM_NOW", "Gửi lệnh điền form"));
+
   // Dừng Hunt
-  document.getElementById("btn-stop-hunt").addEventListener("click", async () => {
-    addLog("⏹ Dừng Hunt...");
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab) {
-      chrome.tabs.sendMessage(tab.id, { type: "STOP_HUNT" }).catch(() => {
-        addLog("❌ Không gửi được");
-      });
-      addLog("✅ Đã gửi STOP_HUNT");
-    }
-  });
+  document.getElementById("btn-stop-hunt").addEventListener("click", () => sendToTab("STOP_HUNT", "Đã gửi dừng Hunt"));
 
   // Mở app (chỉ thông báo vì không mở app từ extension)
   document.getElementById("btn-open-app").addEventListener("click", () => {
