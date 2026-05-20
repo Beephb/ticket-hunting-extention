@@ -161,7 +161,7 @@ class App(ctk.CTk):
         _app_ref = self
 
         self.title("Săn Vé Pro v2.0")
-        self.geometry("860x740")
+        self.geometry("860x800")
         self.configure(fg_color=COLOR_BG)
         self.resizable(True, True)
 

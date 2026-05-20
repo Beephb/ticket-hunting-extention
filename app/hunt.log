@@ -1,64 +1,51 @@
-2026-05-20 14:21:02,608 ✅ Localhost API sẵn sàng tại port 9279
-2026-05-20 14:21:02,699 📌 Load extension vào Chrome, extension sẽ tự kết nối.
-2026-05-20 14:21:08,678 [EXT] ✅ Săn Vé Pro v2.0.0 injected
-2026-05-20 14:21:08,695 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
-2026-05-20 14:21:08,711 [EXT] ✅ Săn Vé Pro v2.0.0 injected
-2026-05-20 14:21:08,750 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
-2026-05-20 14:21:09,813 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465?calendarId=AlumUr
-2026-05-20 14:21:09,924 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465?calendarId=AlumUr
-2026-05-20 14:21:10,169 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465
-2026-05-20 14:21:10,186 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465
-2026-05-20 14:21:16,657 [EXT] 🏹 Bắt đầu Hunt: 1Zone (+ auto chọn ghế)
-2026-05-20 14:21:16,659 [EXT] 🎯 1Zone Sniper — kích hoạt...
-2026-05-20 14:21:16,691 [EXT] 🏹 Bắt đầu Hunt: 1Zone (+ auto chọn ghế)
-2026-05-20 14:21:16,692 [EXT] 🔗 Booking URL: https://ticket.1zone.vn/booking/don-sac-don-8465?calendarId=AlumUr
-2026-05-20 14:21:16,722 [EXT] 🎯 1Zone Sniper — kích hoạt...
-2026-05-20 14:21:16,723 [EXT] 📡 API Poller — poll mỗi 200ms
-2026-05-20 14:21:16,754 [EXT] 🔗 Booking URL: https://ticket.1zone.vn/booking/don-sac-don-8465?calendarId=AlumUr
-2026-05-20 14:21:16,785 [EXT] 📡 API Poller — poll mỗi 200ms
-2026-05-20 14:21:16,850 [EXT] 🎯 10 vé available! Chuyển sang direct nav...
-2026-05-20 14:21:16,852 [EXT] 🚀 Direct nav vào booking (lần 1)...
-2026-05-20 14:21:16,862 [EXT] 🎯 10 vé available! Chuyển sang direct nav...
-2026-05-20 14:21:16,916 [EXT] 🚀 Direct nav vào booking (lần 1)...
-2026-05-20 14:21:17,785 [EXT] ✅ Săn Vé Pro v2.0.0 injected
-2026-05-20 14:21:17,792 [EXT] ✅ Săn Vé Pro v2.0.0 injected
-2026-05-20 14:21:17,800 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
-2026-05-20 14:21:17,801 [EXT] 🎯 Hunt flag detected — tự động chạy seat selector...
-2026-05-20 14:21:17,809 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
-2026-05-20 14:21:17,816 [EXT] 🎯 Hunt flag detected — tự động chạy seat selector...
-2026-05-20 14:21:18,805 [EXT] 🚀 Platform=1Zone | PageType=booking_1zone | mode=seat_zone
-2026-05-20 14:21:18,815 [EXT] 🚀 Platform=1Zone | PageType=booking_1zone | mode=seat_zone
-2026-05-20 14:21:19,607 [EXT] 🪑 Route: 1Zone + seat_zone
-2026-05-20 14:21:19,609 [EXT] 🎟️ 1Zone seat_zone KONVA_NATIVE | ưu tiên=["HIÊN 1"] | SL=2
-2026-05-20 14:21:19,637 [EXT] 🪑 Route: 1Zone + seat_zone
-2026-05-20 14:21:19,639 [EXT] 🔎 eventId=H2TBR7 | calendarId=AlumUr
-2026-05-20 14:21:19,691 [EXT] 🎟️ 1Zone seat_zone KONVA_NATIVE | ưu tiên=["HIÊN 1"] | SL=2
-2026-05-20 14:21:19,692 [EXT] 📡 GET zones API...
-2026-05-20 14:21:19,739 [EXT] 🔎 eventId=H2TBR7 | calendarId=AlumUr
-2026-05-20 14:21:19,766 [EXT] 📋 Zone còn vé: HIÊN 3(10), HIÊN 2(10), HIÊN 1(10)
-2026-05-20 14:21:19,766 [EXT] 📡 GET zones API...
-2026-05-20 14:21:19,768 [EXT] 🎯 Thử zone ưu tiên 1: HIÊN 1
-2026-05-20 14:21:19,784 [EXT] 📋 Zone còn vé: HIÊN 3(10), HIÊN 2(10), HIÊN 1(10)
-2026-05-20 14:21:19,786 [EXT] 🧭 Match zone: HIÊN 1 | zoneId=69f0d4ef2bcbabd63591d68a | ticketClassId=69f0d4c599e52570d16bcb99 | còn=10 | SL=2
-2026-05-20 14:21:19,794 [EXT] 🎯 Thử zone ưu tiên 1: HIÊN 1
-2026-05-20 14:21:19,796 [EXT] 🔎 Konva zone: HIÊN 1 | zoneId=69f0d4ef2bcbabd63591d68a | candidates=18 | {"text":"HIÊN 1","zoneId":"69f0d4ef2bcbabd63591d68a","ticketClassId":"69f0d4c599e52570d16bcb99","disabled":false,"rect":{"x":95,"y":450,"w":147,"h":247},"box":{"left":241,"top":89,"w":1001,"h":797},"s
-2026-05-20 14:21:19,851 [EXT] 🧭 Match zone: HIÊN 1 | zoneId=69f0d4ef2bcbabd63591d68a | ticketClassId=69f0d4c599e52570d16bcb99 | còn=10 | SL=2
-2026-05-20 14:21:19,852 [EXT] 🎯 Thử click zone HIÊN 1: mode=SCALED_center point=(410.1,662.8) hit=CANVAS. text= box=241,89,1001x797
-2026-05-20 14:21:19,875 [EXT] 🔎 Konva zone: HIÊN 1 | zoneId=69f0d4ef2bcbabd63591d68a | candidates=18 | {"text":"HIÊN 1","zoneId":"69f0d4ef2bcbabd63591d68a","ticketClassId":"69f0d4c599e52570d16bcb99","disabled":false,"rect":{"x":95,"y":450,"w":147,"h":247},"box":{"left":241,"top":89,"w":1001,"h":797},"s
-2026-05-20 14:21:19,902 [EXT] 🎯 Thử click zone HIÊN 1: mode=SCALED_center point=(410.1,662.8) hit=CANVAS. text= box=241,89,1001x797
-2026-05-20 14:21:20,023 [EXT] ✅ Popup quantity đã mở: HIÊN 1 | point=(410.1,662.8)
-2026-05-20 14:21:20,110 [EXT] ✅ Popup quantity đã mở: HIÊN 1 | point=(410.1,662.8)
-2026-05-20 14:21:20,164 [EXT] ✅ Quantity đúng: 2
-2026-05-20 14:21:20,217 [EXT] ✅ Quantity đúng: 2
-2026-05-20 14:21:23,984 [EXT] ✅ Turnstile token ready: len=1050
-2026-05-20 14:21:23,986 [EXT] 🖱️ Click button: Tiếp tục
-2026-05-20 14:21:24,011 [EXT] ✅ Turnstile token ready: len=1050
-2026-05-20 14:21:24,075 [EXT] 🖱️ Click button: Tiếp tục
-2026-05-20 14:21:25,302 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/checkout?orderId=6a0d60f4f7824ffd0448a143&calendarId=Alu
-2026-05-20 14:21:25,334 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/checkout?orderId=6a0d60f4f7824ffd0448a143&calendarId=Alu
-2026-05-20 14:21:41,987 [EXT] ⚠️ Không bắt được response add-to-cart sau khi bấm
-2026-05-20 14:21:42,028 [EXT] ⚠️ Không bắt được response add-to-cart sau khi bấm
-2026-05-20 14:21:44,864 [EXT] 📝 Điền form 1Zone...
-2026-05-20 14:21:44,879 [EXT] ✅ Đã điền form 1Zone
-2026-05-20 14:21:44,921 [EXT] 📝 Điền form 1Zone...
-2026-05-20 14:21:44,944 [EXT] ✅ Đã điền form 1Zone
+2026-05-20 19:22:21,099 ✅ Localhost API sẵn sàng tại port 9279
+2026-05-20 19:22:21,146 📌 Load extension vào Chrome, extension sẽ tự kết nối.
+2026-05-20 19:22:28,028 💾 Đã lưu config.
+2026-05-20 19:22:43,575 [EXT] ✅ Săn Vé Pro v2.0.0 injected
+2026-05-20 19:22:43,577 [EXT] ✅ Săn Vé Pro v2.0.0 injected
+2026-05-20 19:22:43,593 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
+2026-05-20 19:22:43,599 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
+2026-05-20 19:22:44,134 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465?calendarId=AlumUr
+2026-05-20 19:22:44,155 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465?calendarId=AlumUr
+2026-05-20 19:22:44,600 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465
+2026-05-20 19:22:44,603 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465
+2026-05-20 19:22:48,888 [EXT] 🏹 Bắt đầu Hunt: 1Zone (+ auto chọn ghế)
+2026-05-20 19:22:48,891 [EXT] 🎯 1Zone Sniper — kích hoạt...
+2026-05-20 19:22:48,920 [EXT] 🏹 Bắt đầu Hunt: 1Zone (+ auto chọn ghế)
+2026-05-20 19:22:48,921 [EXT] 🔗 Booking URL: https://ticket.1zone.vn/booking/don-sac-don-8465?calendarId=AlumUr
+2026-05-20 19:22:48,950 [EXT] 🎯 1Zone Sniper — kích hoạt...
+2026-05-20 19:22:48,957 [EXT] 📡 API Poller — poll mỗi 200ms
+2026-05-20 19:22:48,991 [EXT] 🔗 Booking URL: https://ticket.1zone.vn/booking/don-sac-don-8465?calendarId=AlumUr
+2026-05-20 19:22:49,023 [EXT] 📡 API Poller — poll mỗi 200ms
+2026-05-20 19:22:49,085 [EXT] 🎯 10 vé available! Chuyển sang direct nav...
+2026-05-20 19:22:49,086 [EXT] 🚀 Direct nav vào booking (lần 1)...
+2026-05-20 19:22:49,094 [EXT] 🎯 10 vé available! Chuyển sang direct nav...
+2026-05-20 19:22:49,127 [EXT] 🚀 Direct nav vào booking (lần 1)...
+2026-05-20 19:22:50,274 [EXT] ✅ Săn Vé Pro v2.0.0 injected
+2026-05-20 19:22:50,280 [EXT] ✅ Săn Vé Pro v2.0.0 injected
+2026-05-20 19:22:50,294 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
+2026-05-20 19:22:50,296 [EXT] 🎯 Hunt flag detected — tự động chạy seat selector...
+2026-05-20 19:22:50,302 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
+2026-05-20 19:22:50,316 [EXT] 🎯 Hunt flag detected — tự động chạy seat selector...
+2026-05-20 19:22:51,298 [EXT] 🚀 Platform=1Zone | PageType=booking_1zone | mode=seat_zone
+2026-05-20 19:22:51,305 [EXT] 🚀 Platform=1Zone | PageType=booking_1zone | mode=seat_zone
+2026-05-20 19:22:52,109 [EXT] 🪑 Route: 1Zone + seat_zone
+2026-05-20 19:22:52,110 [EXT] 🎟️ 1Zone seat_zone KONVA_NATIVE | ưu tiên=["HIÊN 4"] | SL=2
+2026-05-20 19:22:52,131 [EXT] 🪑 Route: 1Zone + seat_zone
+2026-05-20 19:22:52,131 [EXT] 🔎 eventId=H2TBR7 | calendarId=AlumUr
+2026-05-20 19:22:52,164 [EXT] 🎟️ 1Zone seat_zone KONVA_NATIVE | ưu tiên=["HIÊN 4"] | SL=2
+2026-05-20 19:22:52,165 [EXT] 📡 GET zones API...
+2026-05-20 19:22:52,197 [EXT] 🔎 eventId=H2TBR7 | calendarId=AlumUr
+2026-05-20 19:22:52,204 [EXT] 📡 GET zones API...
+2026-05-20 19:22:52,283 [EXT] 📋 Zone còn vé: HIÊN 3(10), HIÊN 2(3), HIÊN 1(10)
+2026-05-20 19:22:52,283 [EXT] 🎯 Thử zone ưu tiên 1: HIÊN 4
+2026-05-20 19:22:52,293 [EXT] 📋 Zone còn vé: HIÊN 3(10), HIÊN 2(3), HIÊN 1(10)
+2026-05-20 19:22:52,294 [EXT] ⚠️ không tìm thấy hoặc không đủ vé zone: HIÊN 4
+2026-05-20 19:22:52,301 [EXT] 🎯 Thử zone ưu tiên 1: HIÊN 4
+2026-05-20 19:22:52,317 [EXT] ❌ Không chọn được 1Zone seat_zone. Lỗi cuối: không tìm thấy hoặc không đủ vé zone: HIÊN 4
+2026-05-20 19:22:52,332 [EXT] ⚠️ không tìm thấy hoặc không đủ vé zone: HIÊN 4
+2026-05-20 19:22:52,342 [EXT] ⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.
+2026-05-20 19:22:52,357 [EXT] ❌ Không chọn được 1Zone seat_zone. Lỗi cuối: không tìm thấy hoặc không đủ vé zone: HIÊN 4
+2026-05-20 19:22:52,357 [EXT] ⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.
+2026-05-20 19:22:52,365 [EXT] ⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.
+2026-05-20 19:22:52,384 [EXT] ⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.

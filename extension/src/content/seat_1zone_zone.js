@@ -389,7 +389,7 @@ async function waitTurnstile1Z(timeoutMs = 8000) {
   return false;
 }
 
-// ── Click Tiếp tục và chờ add-to-cart response ───────────────────────────────
+// ── Click Tiếp tục và chờ navigate sang checkout ─────────────────────────────
 
 async function clickPayAndWait1Z(calendarId) {
   await waitTurnstile1Z(8000);
@@ -397,72 +397,34 @@ async function clickPayAndWait1Z(calendarId) {
   const info = getUiInfo1Z();
   if (!info.pay) {
     svpLog("⚠️ Không tìm thấy nút Tiếp tục trong popup", "yellow");
-    return true; // popup đã mở, để user tự xử
+    return true;
   }
 
   svpLog(`🖱️ Click button: Tiếp tục`, "blue");
-
-  // Intercept add-to-cart response bằng XHR/fetch intercept
-  let orderId = null;
-  const origFetch = window.fetch;
-  const fetchPromise = new Promise(resolve => {
-    const timeout = setTimeout(() => resolve(null), 18000);
-    window.fetch = async function(...args) {
-      const res = await origFetch.apply(this, args);
-      const url = String(args[0] || "");
-      if (url.includes("/ticketing/api/v3/order/add-to-cart") ||
-          url.includes("/order/add-to-cart")) {
-        try {
-          const clone = res.clone();
-          const data = await clone.json();
-          // Tìm orderId
-          function findOrderId(obj) {
-            if (!obj || typeof obj !== "object") return "";
-            for (const [k, v] of Object.entries(obj)) {
-              if (["orderId", "id", "_id"].includes(k) && v && String(v) !== "0") return String(v);
-              const sub = findOrderId(v);
-              if (sub) return sub;
-            }
-            return "";
-          }
-          orderId = findOrderId(data);
-          clearTimeout(timeout);
-          resolve({ status: res.status, orderId });
-        } catch {}
-      }
-      return res;
-    };
-  });
-
   info.pay.el.click();
 
-  // Chờ response
-  const result = await Promise.race([
-    fetchPromise,
-    sleep(18000).then(() => null),
-  ]);
-
-  // Restore fetch
-  window.fetch = origFetch;
-
-  if (!result) {
-    svpLog("⚠️ Không bắt được response add-to-cart sau khi bấm", "yellow");
-    return true;
-  }
-
-  if (result.status === 200 || result.status === 201) {
-    svpLog(`✅ Frontend add-to-cart OK. orderId=${result.orderId || "unknown"}`, "green");
-    if (result.orderId) {
-      await sleep(500);
-      svpLog("➡️ Chuyển sang trang checkout/form...", "blue");
-      location.href = `https://ticket.1zone.vn/checkout?orderId=${encodeURIComponent(result.orderId)}&calendarId=${encodeURIComponent(calendarId)}`;
+  // Chờ navigate sang checkout (tối đa 15s)
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    await sleep(300);
+    const url = location.href;
+    if (url.includes("/checkout") || url.includes("/order/")) {
+      svpLog(`✅ Đã navigate sang checkout`, "green");
       return true;
     }
-    return true;
+    if (!dialog1ZZoneVisible()) {
+      await sleep(500);
+      if (location.href.includes("/checkout")) {
+        svpLog(`✅ Đã navigate sang checkout`, "green");
+        return true;
+      }
+      svpLog("⚠️ Popup đóng nhưng chưa navigate checkout", "yellow");
+      return true;
+    }
   }
 
-  svpLog(`⚠️ Frontend add-to-cart HTTP=${result.status}`, "yellow");
-  return false;
+  svpLog("⚠️ Timeout chờ navigate checkout sau khi bấm Tiếp tục", "yellow");
+  return true;
 }
 
 // ── Main flow: 1Zone seat_zone ────────────────────────────────────────────────

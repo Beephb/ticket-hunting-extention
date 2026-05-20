@@ -131,7 +131,71 @@ async function startHunt(autoSeat = true) {
   }
 }
 
-// ── Main router ───────────────────────────────────────────────────────────────
+// ── Toast thông báo trên trang ────────────────────────────────────────────────
+
+function showSeatFailToast(mode) {
+  // Xóa toast cũ nếu có
+  document.getElementById("__svp_toast__")?.remove();
+
+  const toast = document.createElement("div");
+  toast.id = "__svp_toast__";
+  toast.style.cssText = `
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 999999;
+    background: #1a1a2e;
+    border: 2px solid #ef4444;
+    border-radius: 12px;
+    padding: 16px 20px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 340px;
+    max-width: 90vw;
+    font-family: -apple-system, 'Segoe UI', sans-serif;
+    animation: __svp_slide_in 0.3s ease;
+  `;
+
+  const style = document.createElement("style");
+  style.textContent = `
+    @keyframes __svp_slide_in {
+      from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+      to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+    }
+    #__svp_toast__ button:hover { opacity: 0.85; }
+  `;
+  document.head.appendChild(style);
+
+  toast.innerHTML = `
+    <div style="font-size:28px;line-height:1">⚠️</div>
+    <div style="flex:1">
+      <div style="color:#ef4444;font-weight:700;font-size:15px;margin-bottom:4px">
+        Không chọn được ghế!
+      </div>
+      <div style="color:#94a3b8;font-size:12px;line-height:1.4">
+        Hết ghế hoặc lỗi khi chọn ${mode}.<br>Hãy tự chọn ghế thủ công trên trang.
+      </div>
+    </div>
+    <button id="__svp_btn_close__" style="
+      background:#ef4444;color:#fff;border:none;border-radius:8px;
+      padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;
+      white-space:nowrap;flex-shrink:0;
+    ">Tự chọn ghế</button>
+  `;
+
+  document.body.appendChild(toast);
+
+  // Nút tự chọn ghế — chỉ đóng toast
+  document.getElementById("__svp_btn_close__")?.addEventListener("click", () => toast.remove());
+
+  // Tự đóng sau 30s
+  setTimeout(() => toast.remove(), 30000);
+}
+
+
 
 async function maybeRun(force = false) {
   if (_running) { svpLog("⏳ Bot đang chạy, bỏ qua", "gray"); return; }
@@ -174,11 +238,19 @@ async function maybeRun(force = false) {
   await sleep(800);
   try {
     svpLog(`🪑 Route: ${platform} + ${mode}`, "blue");
-    if (platform === "1Zone" && mode === "seat_zone") await run1ZoneSeatZone(_cfg);
-    else if (platform === "1Zone" && mode === "seat_map") await run1ZoneSeatMap(_cfg);
-    else if (platform === "Ticketbox" && mode === "seat_zone") await runTicketboxSeatZone(_cfg);
-    else if (platform === "Ticketbox" && mode === "seat_map") await runTicketboxSeatMap(_cfg);
-    else svpLog(`⚠️ Không có flow cho: ${platform} + ${mode}`, "yellow");
+    let seatOk = false;
+    if (platform === "1Zone" && mode === "seat_zone") seatOk = await run1ZoneSeatZone(_cfg);
+    else if (platform === "1Zone" && mode === "seat_map") seatOk = await run1ZoneSeatMap(_cfg);
+    else if (platform === "Ticketbox" && mode === "seat_zone") seatOk = await runTicketboxSeatZone(_cfg);
+    else if (platform === "Ticketbox" && mode === "seat_map") seatOk = await runTicketboxSeatMap(_cfg);
+    else { svpLog(`⚠️ Không có flow cho: ${platform} + ${mode}`, "yellow"); return; }
+
+    if (!seatOk) {
+      const msg = "⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.";
+      svpLog(msg, "red");
+      chrome.runtime.sendMessage({ type: "LOG", msg, color: "red" });
+      showSeatFailToast(mode);
+    }
   } catch (e) {
     svpLog(`❌ Lỗi trong flow: ${e.message}`, "red");
     console.error("[SVP]", e);
@@ -195,8 +267,24 @@ function watchNavigation() {
   setInterval(() => {
     if (location.href !== _lastUrl) {
       _lastUrl = location.href;
-      _running = false;
+      _running = false; // reset running khi navigate
       svpLog(`🔄 SPA nav → ${location.href.slice(0, 80)}`, "gray");
+
+      // Nếu navigate sang checkout → điền form luôn, không qua maybeRun
+      if (location.href.includes("/checkout") || location.href.includes("/order/")) {
+        setTimeout(async () => {
+          if (!_cfg) await initConfig();
+          if (!_cfg) return;
+          svpLog("📝 Tự động điền form checkout...", "blue");
+          try {
+            await autoFillForm(_cfg);
+          } catch(e) {
+            svpLog(`⚠️ Fill form lỗi: ${e.message}`, "yellow");
+          }
+        }, 800);
+        return;
+      }
+
       setTimeout(() => maybeRun(), 1500);
     }
   }, 500);
