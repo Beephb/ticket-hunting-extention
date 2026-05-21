@@ -139,6 +139,8 @@ function detectTbPageState() {
 
 async function waitTbQueueExit(timeoutMs = 180000) {
   svpLog("⏳ Ticketbox đang trong queue — chờ tự redirect...", "yellow");
+  if (typeof showIndicator === "function")
+    showIndicator("🟡 Trong hàng chờ...", "Chờ Ticketbox redirect tự động", "#facc15");
   const deadline = Date.now() + timeoutMs;
   let lastLog = 0;
 
@@ -235,14 +237,20 @@ async function directTbShowingsAndNav(eventId, showingId, date) {
 
     if (state === "captcha") {
       svpLog("🧩 Đã tới captcha — dừng bot, giải tay.", "yellow");
+      if (typeof showIndicator === "function")
+        showIndicator("🟠 Captcha! Cần giải tay", "Bot đã dừng, bạn tự giải captcha", "#f97316");
       return true;
     }
     if (state === "select") {
       svpLog("✅ Đã tới trang chọn vé/chọn ghế — dừng bot.", "green");
+      if (typeof showIndicator === "function")
+        showIndicator("🟡 Đang chọn ghế...", "Đã vào trang booking", "#facc15");
       return true;
     }
     if (state === "form") {
       svpLog("✅ Đã tới form — có thể điền thông tin.", "green");
+      if (typeof showIndicator === "function")
+        showIndicator("🟢 Đã vào checkout!", "Đang điền form...", "#22c55e");
       return true;
     }
     await sleep(300);

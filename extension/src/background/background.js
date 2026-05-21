@@ -34,7 +34,6 @@ let _appOnline = false;
 // ── Inject content scripts vào tab ───────────────────────────────────────────
 
 async function injectTab(tabId, url) {
-  // Kiểm tra URL có phải target không
   const isTarget = TARGET_URLS.some(t => url.startsWith(t));
   if (!isTarget) return;
 
@@ -71,11 +70,12 @@ async function injectTab(tabId, url) {
 
 // ── Listen navigation events ──────────────────────────────────────────────────
 
+// ── Listen navigation events ──────────────────────────────────────────────────
+
 chrome.webNavigation.onCommitted.addListener(({ tabId, url, frameId }) => {
-  if (frameId !== 0) return; // chỉ main frame
+  if (frameId !== 0) return;
   const isTarget = TARGET_URLS.some(t => url.startsWith(t));
   if (!isTarget) return;
-  // URL mới → xóa cache inject cũ để inject lại
   if (_injected.get(tabId) !== url) {
     _injected.delete(tabId);
   }
@@ -227,7 +227,7 @@ chrome.commands.onCommand.addListener(async (command) => {
   if (!tab) return;
 
   if (command === "hunt") {
-    chrome.tabs.sendMessage(tab.id, { type: "HUNT_ONLY" }).catch(() => {});
+    chrome.tabs.sendMessage(tab.id, { type: "HUNT_NOW" }).catch(() => {});
   } else if (command === "select_seat") {
     chrome.tabs.sendMessage(tab.id, { type: "RUN_NOW" }).catch(() => {});
   } else if (command === "fill_form") {

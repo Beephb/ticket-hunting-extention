@@ -80,7 +80,7 @@ function detectPageType() {
   if (/\/booking\//.test(path)) return "booking_1zone";
   if (/\/events\/\d+\/bookings\/\d+\/select-ticket/.test(path)) return "select_ticket_tb";
   if (/\/events\//.test(path)) return "event";
-  if (/\/checkout/.test(path) || /\/order\//.test(path)) return "checkout";
+  if (/\/checkout/.test(path) || /\/order\//.test(path) || /\/question-form/.test(path)) return "checkout";
   return "other";
 }
 

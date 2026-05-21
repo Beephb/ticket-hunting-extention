@@ -7,10 +7,8 @@ async function fill1Zone(cfg) {
   svpLog("📝 Điền form 1Zone...", "blue");
   const name = cfg.name || "";
   const phone = cfg.phone || "";
-  const email = cfg.email || "";
   const address = cfg.address || "";
 
-  // Đợi input tên xuất hiện — tín hiệu form đã load
   try {
     await waitForElement("input[data-id='txt-name']", 15000);
   } catch {
@@ -19,47 +17,38 @@ async function fill1Zone(cfg) {
   }
 
   try {
-    // Điền tên
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+
     const nameInp = document.querySelector("input[data-id='txt-name']");
     if (nameInp) {
       nameInp.focus();
-      // Dùng native setter để React nhận được
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
       nativeSetter.call(nameInp, name);
       nameInp.dispatchEvent(new Event("input", { bubbles: true }));
       nameInp.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
-    // Điền SĐT
     const phoneInp = document.querySelector("input[data-id='txt-phoneNumber']");
     if (phoneInp) {
       phoneInp.focus();
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
       nativeSetter.call(phoneInp, phone);
       phoneInp.dispatchEvent(new Event("input", { bubbles: true }));
       phoneInp.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
-    // Điền địa chỉ nếu có field
     try {
       const addrInp = document.querySelector("input[name='địaChỉCủaBạn'], input[data-id='txt-note']");
       if (addrInp && address) {
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
         nativeSetter.call(addrInp, address);
         addrInp.dispatchEvent(new Event("input", { bubbles: true }));
-        addrInp.dispatchEvent(new Event("change", { bubbles: true }));
       }
     } catch {}
 
-    // Check checkbox đồng ý điều khoản nếu có
     try {
       const cb = document.querySelector("input[type='checkbox']");
       if (cb && !cb.checked) cb.click();
     } catch {}
 
-    // Trigger resize để UI update
     window.dispatchEvent(new Event("resize"));
-
     svpLog("✅ Đã điền form 1Zone", "green");
     return true;
   } catch(e) {
@@ -76,7 +65,6 @@ async function fillTicketbox(cfg) {
   const phone = cfg.phone || "";
   const email = cfg.email || "";
 
-  // Đợi labels xuất hiện
   try {
     await waitForElement("label[for^='question_']", 15000);
   } catch {
@@ -84,34 +72,46 @@ async function fillTicketbox(cfg) {
     return false;
   }
 
-  // Delay nhỏ để tất cả fields render xong
   await sleep(500);
 
   try {
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
     const labels = Array.from(document.querySelectorAll("label[for^='question_']"));
+
     for (const label of labels) {
       try {
         const txt = (label.innerText || "").toLowerCase().trim();
         const fid = label.getAttribute("for");
         if (!fid) continue;
 
-        const inp = document.getElementById(fid);
-        if (!inp) continue;
+        const el = document.getElementById(fid);
+        if (!el) continue;
 
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        // Radio group (Ant Design) — đồng ý điều khoản
+        if (el.classList.contains("ant-radio-group") || el.tagName === "DIV") {
+          const radio = el.querySelector("input[type='radio']");
+          if (radio && !radio.checked) {
+            radio.click();
+            svpLog("✅ Đã tick đồng ý điều khoản", "green");
+          }
+          continue;
+        }
 
-        if (["tên", "full name", "họ và tên", "name"].some(k => txt.includes(k))) {
-          nativeSetter.call(inp, name);
-          inp.dispatchEvent(new Event("input", { bubbles: true }));
-          inp.dispatchEvent(new Event("change", { bubbles: true }));
+        // Input text thường
+        if (el.tagName !== "INPUT") continue;
+
+        if (["tên", "full name", "họ và tên", "họ & tên", "name"].some(k => txt.includes(k))) {
+          nativeSetter.call(el, name);
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
         } else if (["điện thoại", "phone", "số điện thoại", "mobile"].some(k => txt.includes(k))) {
-          nativeSetter.call(inp, phone);
-          inp.dispatchEvent(new Event("input", { bubbles: true }));
-          inp.dispatchEvent(new Event("change", { bubbles: true }));
+          nativeSetter.call(el, phone);
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
         } else if (txt.includes("email")) {
-          nativeSetter.call(inp, email);
-          inp.dispatchEvent(new Event("input", { bubbles: true }));
-          inp.dispatchEvent(new Event("change", { bubbles: true }));
+          nativeSetter.call(el, email);
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
         }
       } catch { continue; }
     }

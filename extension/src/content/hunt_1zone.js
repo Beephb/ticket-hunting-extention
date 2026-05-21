@@ -160,6 +160,8 @@ function is1ZBookingReadyDom() {
 
 async function wait1ZQueueExit(timeoutMs = 120000) {
   svpLog("⏳ Đang trong hàng chờ (queue) — chờ đến lượt...", "yellow");
+  if (typeof showIndicator === "function")
+    showIndicator("🟡 Trong hàng chờ...", "Chờ đến lượt tự động", "#facc15");
   const deadline = Date.now() + timeoutMs;
   let lastLog = 0;
 

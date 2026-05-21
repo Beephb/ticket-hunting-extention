@@ -77,28 +77,11 @@ async function init() {
     }
   }
 
-  // Alt+2: Chọn ghế ngay
-  document.getElementById("btn-run").addEventListener("click", () => sendToTab("RUN_NOW", "Gửi lệnh chọn ghế"));
-
-  // Alt+1: Hunt + chọn tự động
-  document.getElementById("btn-hunt").addEventListener("click", () => sendToTab("HUNT_NOW", "Bắt đầu Hunt + auto chọn ghế"));
-
-  // Chỉ Hunt (không set flag auto seat)
-  document.getElementById("btn-hunt-only").addEventListener("click", async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab) {
-      chrome.tabs.sendMessage(tab.id, { type: "HUNT_ONLY" }).catch(() => {
-        addLog("❌ Tab chưa load content script");
-      });
-      addLog("✅ Bắt đầu Hunt (chỉ navigate, không chọn ghế)");
-    }
-  });
-
-  // Alt+3: Điền form
-  document.getElementById("btn-fill").addEventListener("click", () => sendToTab("FILL_FORM_NOW", "Gửi lệnh điền form"));
-
-  // Dừng Hunt
-  document.getElementById("btn-stop-hunt").addEventListener("click", () => sendToTab("STOP_HUNT", "Đã gửi dừng Hunt"));
+  document.getElementById("btn-hunt-auto").addEventListener("click", () => sendToTab("HUNT_NOW", "Bắt đầu Hunt + auto chọn ghế"));
+  document.getElementById("btn-hunt-only").addEventListener("click", () => sendToTab("HUNT_ONLY", "Bắt đầu Hunt (chỉ navigate)"));
+  document.getElementById("btn-seat").addEventListener("click", () => sendToTab("RUN_NOW", "Gửi lệnh chọn ghế"));
+  document.getElementById("btn-form").addEventListener("click", () => sendToTab("FILL_FORM_NOW", "Gửi lệnh điền form"));
+  document.getElementById("btn-stop").addEventListener("click", () => sendToTab("STOP_HUNT", "Đã gửi dừng Hunt"));
 
   // Mở app (chỉ thông báo vì không mở app từ extension)
   document.getElementById("btn-open-app").addEventListener("click", () => {

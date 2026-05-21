@@ -1,51 +1,73 @@
-2026-05-20 19:22:21,099 ✅ Localhost API sẵn sàng tại port 9279
-2026-05-20 19:22:21,146 📌 Load extension vào Chrome, extension sẽ tự kết nối.
-2026-05-20 19:22:28,028 💾 Đã lưu config.
-2026-05-20 19:22:43,575 [EXT] ✅ Săn Vé Pro v2.0.0 injected
-2026-05-20 19:22:43,577 [EXT] ✅ Săn Vé Pro v2.0.0 injected
-2026-05-20 19:22:43,593 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
-2026-05-20 19:22:43,599 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
-2026-05-20 19:22:44,134 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465?calendarId=AlumUr
-2026-05-20 19:22:44,155 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465?calendarId=AlumUr
-2026-05-20 19:22:44,600 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465
-2026-05-20 19:22:44,603 [EXT] 🔄 SPA nav → https://ticket.1zone.vn/events/don-sac-don-8465
-2026-05-20 19:22:48,888 [EXT] 🏹 Bắt đầu Hunt: 1Zone (+ auto chọn ghế)
-2026-05-20 19:22:48,891 [EXT] 🎯 1Zone Sniper — kích hoạt...
-2026-05-20 19:22:48,920 [EXT] 🏹 Bắt đầu Hunt: 1Zone (+ auto chọn ghế)
-2026-05-20 19:22:48,921 [EXT] 🔗 Booking URL: https://ticket.1zone.vn/booking/don-sac-don-8465?calendarId=AlumUr
-2026-05-20 19:22:48,950 [EXT] 🎯 1Zone Sniper — kích hoạt...
-2026-05-20 19:22:48,957 [EXT] 📡 API Poller — poll mỗi 200ms
-2026-05-20 19:22:48,991 [EXT] 🔗 Booking URL: https://ticket.1zone.vn/booking/don-sac-don-8465?calendarId=AlumUr
-2026-05-20 19:22:49,023 [EXT] 📡 API Poller — poll mỗi 200ms
-2026-05-20 19:22:49,085 [EXT] 🎯 10 vé available! Chuyển sang direct nav...
-2026-05-20 19:22:49,086 [EXT] 🚀 Direct nav vào booking (lần 1)...
-2026-05-20 19:22:49,094 [EXT] 🎯 10 vé available! Chuyển sang direct nav...
-2026-05-20 19:22:49,127 [EXT] 🚀 Direct nav vào booking (lần 1)...
-2026-05-20 19:22:50,274 [EXT] ✅ Săn Vé Pro v2.0.0 injected
-2026-05-20 19:22:50,280 [EXT] ✅ Săn Vé Pro v2.0.0 injected
-2026-05-20 19:22:50,294 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
-2026-05-20 19:22:50,296 [EXT] 🎯 Hunt flag detected — tự động chạy seat selector...
-2026-05-20 19:22:50,302 [EXT] ⚙️ Config loaded | platform=1Zone | enabled=false
-2026-05-20 19:22:50,316 [EXT] 🎯 Hunt flag detected — tự động chạy seat selector...
-2026-05-20 19:22:51,298 [EXT] 🚀 Platform=1Zone | PageType=booking_1zone | mode=seat_zone
-2026-05-20 19:22:51,305 [EXT] 🚀 Platform=1Zone | PageType=booking_1zone | mode=seat_zone
-2026-05-20 19:22:52,109 [EXT] 🪑 Route: 1Zone + seat_zone
-2026-05-20 19:22:52,110 [EXT] 🎟️ 1Zone seat_zone KONVA_NATIVE | ưu tiên=["HIÊN 4"] | SL=2
-2026-05-20 19:22:52,131 [EXT] 🪑 Route: 1Zone + seat_zone
-2026-05-20 19:22:52,131 [EXT] 🔎 eventId=H2TBR7 | calendarId=AlumUr
-2026-05-20 19:22:52,164 [EXT] 🎟️ 1Zone seat_zone KONVA_NATIVE | ưu tiên=["HIÊN 4"] | SL=2
-2026-05-20 19:22:52,165 [EXT] 📡 GET zones API...
-2026-05-20 19:22:52,197 [EXT] 🔎 eventId=H2TBR7 | calendarId=AlumUr
-2026-05-20 19:22:52,204 [EXT] 📡 GET zones API...
-2026-05-20 19:22:52,283 [EXT] 📋 Zone còn vé: HIÊN 3(10), HIÊN 2(3), HIÊN 1(10)
-2026-05-20 19:22:52,283 [EXT] 🎯 Thử zone ưu tiên 1: HIÊN 4
-2026-05-20 19:22:52,293 [EXT] 📋 Zone còn vé: HIÊN 3(10), HIÊN 2(3), HIÊN 1(10)
-2026-05-20 19:22:52,294 [EXT] ⚠️ không tìm thấy hoặc không đủ vé zone: HIÊN 4
-2026-05-20 19:22:52,301 [EXT] 🎯 Thử zone ưu tiên 1: HIÊN 4
-2026-05-20 19:22:52,317 [EXT] ❌ Không chọn được 1Zone seat_zone. Lỗi cuối: không tìm thấy hoặc không đủ vé zone: HIÊN 4
-2026-05-20 19:22:52,332 [EXT] ⚠️ không tìm thấy hoặc không đủ vé zone: HIÊN 4
-2026-05-20 19:22:52,342 [EXT] ⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.
-2026-05-20 19:22:52,357 [EXT] ❌ Không chọn được 1Zone seat_zone. Lỗi cuối: không tìm thấy hoặc không đủ vé zone: HIÊN 4
-2026-05-20 19:22:52,357 [EXT] ⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.
-2026-05-20 19:22:52,365 [EXT] ⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.
-2026-05-20 19:22:52,384 [EXT] ⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.
+2026-05-21 21:23:09,571 ✅ API sẵn sàng tại port 9279
+2026-05-21 21:23:09,613 📌 Load extension vào Chrome, extension sẽ tự kết nối.
+2026-05-21 21:23:15,830 💾 Đã lưu config.
+2026-05-21 21:23:26,767 [EXT] ✅ Săn Vé Pro v2.0.0 injected
+2026-05-21 21:23:26,769 [EXT] ✅ Săn Vé Pro v2.0.0 injected
+2026-05-21 21:23:26,774 [EXT] ⚙️ Config loaded | platform=Ticketbox | enabled=false
+2026-05-21 21:23:26,781 [EXT] ⚙️ Config loaded | platform=Ticketbox | enabled=false
+2026-05-21 21:23:31,958 [EXT] 🏹 Bắt đầu Hunt: Ticketbox (+ auto chọn ghế)
+2026-05-21 21:23:31,963 [EXT] 🎯 Ticketbox Direct Nav v3 — không click button + queue-aware
+2026-05-21 21:23:32,001 [EXT] 🏹 Bắt đầu Hunt: Ticketbox (+ auto chọn ghế)
+2026-05-21 21:23:32,007 [EXT] 🔎 Event ID: 26063
+2026-05-21 21:23:32,036 [EXT] 🎯 Ticketbox Direct Nav v3 — không click button + queue-aware
+2026-05-21 21:23:32,037 [EXT] 📅 Date dùng để test: 2026-05-21
+2026-05-21 21:23:32,064 [EXT] 🔎 Event ID: 26063
+2026-05-21 21:23:32,065 [EXT] 📡 Ticketbox API Poller — poll event mỗi 300ms
+2026-05-21 21:23:32,090 [EXT] 📅 Date dùng để test: 2026-05-21
+2026-05-21 21:23:32,091 [EXT] 🎯 Showing mở bán: 75787239075983 (Mua vé ngay)
+2026-05-21 21:23:32,123 [EXT] 📡 Ticketbox API Poller — poll event mỗi 300ms
+2026-05-21 21:23:32,124 [EXT] 📅 Override date theo showing: 2026-05-29
+2026-05-21 21:23:32,125 [EXT] 🎯 Showing mở bán: 75787239075983 (Mua vé ngay)
+2026-05-21 21:23:32,126 [EXT] 🚀 GET trực tiếp showings/75787239075983?date=2026-05-29
+2026-05-21 21:23:32,127 [EXT] 📅 Override date theo showing: 2026-05-29
+2026-05-21 21:23:32,137 [EXT] 📡 Showings API HTTP=200
+2026-05-21 21:23:32,164 [EXT] 🚀 GET trực tiếp showings/75787239075983?date=2026-05-29
+2026-05-21 21:23:32,165 [EXT] 🗺️ GET seatmap/75787239075983
+2026-05-21 21:23:32,168 [EXT] 📡 Showings API HTTP=200
+2026-05-21 21:23:32,169 [EXT] 📡 Seatmap API HTTP=200
+2026-05-21 21:23:32,222 [EXT] 🗺️ GET seatmap/75787239075983
+2026-05-21 21:23:32,224 [EXT] 🚀 Direct nav select-ticket: https://ticketbox.vn/events/26063/bookings/75787239075983/select-ticket
+2026-05-21 21:23:32,228 [EXT] 📡 Seatmap API HTTP=200
+2026-05-21 21:23:32,236 [EXT] 🚀 Direct nav select-ticket: https://ticketbox.vn/events/26063/bookings/75787239075983/select-ticket
+2026-05-21 21:23:32,245 [EXT] ✅ Săn Vé Pro v2.0.0 injected
+2026-05-21 21:23:32,251 [EXT] ⚙️ Config loaded | platform=Ticketbox | enabled=false
+2026-05-21 21:23:32,258 [EXT] ✅ Săn Vé Pro v2.0.0 injected
+2026-05-21 21:23:32,259 [EXT] 🎯 Hunt flag detected — tự động chạy seat selector...
+2026-05-21 21:23:32,266 [EXT] ⚙️ Config loaded | platform=Ticketbox | enabled=false
+2026-05-21 21:23:32,272 [EXT] 🎯 Hunt flag detected — tự động chạy seat selector...
+2026-05-21 21:23:33,278 [EXT] 🚀 Platform=Ticketbox | PageType=select_ticket_tb | mode=seat_map
+2026-05-21 21:23:33,286 [EXT] 🚀 Platform=Ticketbox | PageType=select_ticket_tb | mode=seat_map
+2026-05-21 21:23:34,079 [EXT] 🪑 Route: Ticketbox + seat_map
+2026-05-21 21:23:34,081 [EXT] 🪑 Ticketbox seat_map | SL=1 | dãy=auto
+2026-05-21 21:23:34,094 [EXT] 🪑 Route: Ticketbox + seat_map
+2026-05-21 21:23:34,102 [EXT] 🪑 Ticketbox seat_map | SL=1 | dãy=auto
+2026-05-21 21:23:34,162 [EXT] 🔎 Showing candidates: 75787239075983@2026-05-21[event-api,performance,url], 55444188224087@2026-05-28[event-api]
+2026-05-21 21:23:34,163 [EXT] 🎬 Thử showing 1/2: 75787239075983 | date=2026-05-21
+2026-05-21 21:23:34,173 [EXT] 🔎 Showing candidates: 75787239075983@2026-05-21[event-api,performance,url], 55444188224087@2026-05-28[event-api]
+2026-05-21 21:23:34,210 [EXT] 🎬 Thử showing 1/2: 75787239075983 | date=2026-05-21
+2026-05-21 21:23:34,243 [EXT] ✅ Showings OK | showing=75787239075983 | ticketTypes=2
+2026-05-21 21:23:34,255 [EXT] ✅ Showings OK | showing=75787239075983 | ticketTypes=2
+2026-05-21 21:23:34,334 [EXT] 🗺️ Seatmap OK | showing=75787239075983 | sections=5
+2026-05-21 21:23:34,334 [EXT] 🎯 Ưu tiên 1: VÉ THƯỜNG | type=text
+2026-05-21 21:23:34,344 [EXT] 🗺️ Seatmap OK | showing=75787239075983 | sections=5
+2026-05-21 21:23:34,357 [EXT] 🎯 Ưu tiên 1: VÉ THƯỜNG | type=text
+2026-05-21 21:23:34,421 [EXT] ✅ Chọn được 1 ghế: B-32 | section=THUONG_2 | ticket=VÉ THƯỜNG
+2026-05-21 21:23:34,428 [EXT] 🎯 Thử click B-32: mode=konva-transform scaleX=2.566 point=(1245.6,376.0) hit=CANVAS. text= box=0,75,1489x843
+2026-05-21 21:23:34,434 [EXT] ✅ Chọn được 1 ghế: B-32 | section=THUONG_2 | ticket=VÉ THƯỜNG
+2026-05-21 21:23:34,447 [EXT] 🎯 Thử click B-32: mode=konva-transform scaleX=2.566 point=(1245.6,376.0) hit=CANVAS. text= box=0,75,1489x843
+2026-05-21 21:23:34,828 [EXT] ✅ UI xác nhận đã chọn ghế: B-32
+2026-05-21 21:23:34,831 [EXT] 🖱️ Đã click: Tiếp tục - 330.000 đ
+2026-05-21 21:23:34,844 [EXT] ✅ UI xác nhận đã chọn ghế: B-32
+2026-05-21 21:23:34,894 [EXT] 🖱️ Đã click: Tiếp tục - 330.000 đ
+2026-05-21 21:23:35,298 [EXT] 🔄 SPA nav → https://ticketbox.vn/events/26063/bookings/75787239075983/question-form?date=202
+2026-05-21 21:23:35,361 [EXT] 🔄 SPA nav → https://ticketbox.vn/events/26063/bookings/75787239075983/question-form?date=202
+2026-05-21 21:23:35,643 [EXT] ✅ Đã chọn ghế và bấm Tiếp tục. Dừng ở bước form để mày tự xử lý.
+2026-05-21 21:23:35,673 [EXT] ✅ Đã chọn ghế và bấm Tiếp tục. Dừng ở bước form để mày tự xử lý.
+2026-05-21 21:23:37,300 [EXT] 📝 Tự động điền form checkout...
+2026-05-21 21:23:37,301 [EXT] 📝 Điền form Ticketbox...
+2026-05-21 21:23:37,337 [EXT] 📝 Tự động điền form checkout...
+2026-05-21 21:23:37,354 [EXT] 📝 Điền form Ticketbox...
+2026-05-21 21:23:37,810 [EXT] ✅ Đã tick đồng ý điều khoản
+2026-05-21 21:23:37,830 [EXT] ✅ Đã điền form Ticketbox
+2026-05-21 21:23:37,863 [EXT] ✅ Đã tick đồng ý điều khoản
+2026-05-21 21:23:37,909 [EXT] ✅ Đã điền form Ticketbox

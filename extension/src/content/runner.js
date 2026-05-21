@@ -119,6 +119,7 @@ async function startHunt(autoSeat = true) {
   if (!platform) { svpLog("⚠️ Không phải trang 1Zone/Ticketbox", "yellow"); return; }
   _running = true;
   svpLog(`🏹 Bắt đầu Hunt: ${platform}${autoSeat ? " (+ auto chọn ghế)" : " (chỉ hunt)"}`, "blue");
+  startHuntIndicator(_cfg);
   try {
     if (autoSeat) setHuntFlag();
     if (platform === "1Zone") await hunt1Zone(_cfg);
@@ -129,6 +130,85 @@ async function startHunt(autoSeat = true) {
   } finally {
     _running = false;
   }
+}
+
+// ── Indicator badge ───────────────────────────────────────────────────────────
+
+const INDICATOR_ID = "__svp_indicator__";
+let _indicatorInterval = null;
+let _indicatorStartTime = null;
+let _indicatorPollCount = 0;
+
+function _getOrCreateIndicator() {
+  let el = document.getElementById(INDICATOR_ID);
+  if (el) return el;
+
+  const style = document.createElement("style");
+  style.textContent = `
+    #${INDICATOR_ID} {
+      position:fixed;bottom:16px;right:16px;z-index:999998;
+      background:#0f172a;border:1.5px solid #1e293b;border-radius:12px;
+      padding:10px 14px;min-width:200px;max-width:280px;
+      font-family:-apple-system,'Segoe UI',sans-serif;
+      box-shadow:0 4px 20px rgba(0,0,0,0.4);cursor:default;
+      animation:__svp_fadein .3s ease;
+    }
+    @keyframes __svp_fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+    #${INDICATOR_ID} .si-row{display:flex;align-items:center;gap:8px;}
+    #${INDICATOR_ID} .si-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+    #${INDICATOR_ID} .si-title{font-size:12px;font-weight:600;color:#e2e8f0;flex:1;}
+    #${INDICATOR_ID} .si-close{font-size:11px;color:#475569;cursor:pointer;padding:0 2px;}
+    #${INDICATOR_ID} .si-close:hover{color:#94a3b8;}
+    #${INDICATOR_ID} .si-sub{font-size:10px;color:#64748b;margin-top:3px;line-height:1.4;}
+  `;
+  document.head.appendChild(style);
+
+  el = document.createElement("div");
+  el.id = INDICATOR_ID;
+  el.innerHTML = `
+    <div class="si-row">
+      <div class="si-dot" id="__svp_dot__"></div>
+      <div class="si-title" id="__svp_ititle__">Săn Vé Pro</div>
+      <span class="si-close" id="__svp_iclose__">✕</span>
+    </div>
+    <div class="si-sub" id="__svp_isub__"></div>
+  `;
+  document.body.appendChild(el);
+  document.getElementById("__svp_iclose__")?.addEventListener("click", hideIndicator);
+  return el;
+}
+
+function showIndicator(title, sub, color) {
+  const el = _getOrCreateIndicator();
+  el.style.display = "block";
+  el.style.borderColor = (color || "#1e293b") + "88";
+  const dot = document.getElementById("__svp_dot__");
+  const t = document.getElementById("__svp_ititle__");
+  const s = document.getElementById("__svp_isub__");
+  if (dot) dot.style.background = color || "#64748b";
+  if (t) t.textContent = title;
+  if (s) s.textContent = sub || "";
+}
+
+function hideIndicator() {
+  document.getElementById(INDICATOR_ID)?.remove();
+  if (_indicatorInterval) { clearInterval(_indicatorInterval); _indicatorInterval = null; }
+}
+
+function startHuntIndicator(cfg) {
+  _indicatorStartTime = Date.now();
+  _indicatorPollCount = 0;
+  const zone = (cfg?.auto_seat?.zone_priority || [])[0] || "—";
+  const qty = cfg?.auto_seat?.quantity || 1;
+  if (_indicatorInterval) clearInterval(_indicatorInterval);
+  _indicatorInterval = setInterval(() => {
+    _indicatorPollCount++;
+    const elapsed = Math.floor((Date.now() - _indicatorStartTime) / 1000);
+    const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
+    const ss = String(elapsed % 60).padStart(2, "0");
+    showIndicator("🔴 Đang săn vé...",
+      `Poll #${_indicatorPollCount.toLocaleString()} | ${mm}:${ss} | ${zone} · ${qty} vé`, "#ef4444");
+  }, 500);
 }
 
 // ── Toast thông báo trên trang ────────────────────────────────────────────────
@@ -239,6 +319,7 @@ async function maybeRun(force = false) {
   try {
     svpLog(`🪑 Route: ${platform} + ${mode}`, "blue");
     let seatOk = false;
+    showIndicator("🟡 Đang chọn ghế...", `${platform} · ${mode}`, "#facc15");
     if (platform === "1Zone" && mode === "seat_zone") seatOk = await run1ZoneSeatZone(_cfg);
     else if (platform === "1Zone" && mode === "seat_map") seatOk = await run1ZoneSeatMap(_cfg);
     else if (platform === "Ticketbox" && mode === "seat_zone") seatOk = await runTicketboxSeatZone(_cfg);
@@ -249,7 +330,11 @@ async function maybeRun(force = false) {
       const msg = "⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.";
       svpLog(msg, "red");
       chrome.runtime.sendMessage({ type: "LOG", msg, color: "red" });
+      showIndicator("⚠️ Không chọn được ghế", "Bấm Alt+2 để tự chọn thủ công", "#ef4444");
       showSeatFailToast(mode);
+    } else {
+      showIndicator("🟢 Đã vào checkout!", "Đang điền form...", "#22c55e");
+      setTimeout(hideIndicator, 5000);
     }
   } catch (e) {
     svpLog(`❌ Lỗi trong flow: ${e.message}`, "red");
@@ -271,7 +356,7 @@ function watchNavigation() {
       svpLog(`🔄 SPA nav → ${location.href.slice(0, 80)}`, "gray");
 
       // Nếu navigate sang checkout → điền form luôn, không qua maybeRun
-      if (location.href.includes("/checkout") || location.href.includes("/order/")) {
+      if (location.href.includes("/checkout") || location.href.includes("/order/") || location.href.includes("/question-form")) {
         setTimeout(async () => {
           if (!_cfg) await initConfig();
           if (!_cfg) return;
@@ -281,7 +366,7 @@ function watchNavigation() {
           } catch(e) {
             svpLog(`⚠️ Fill form lỗi: ${e.message}`, "yellow");
           }
-        }, 800);
+        }, 2000);
         return;
       }
 
@@ -303,6 +388,19 @@ function watchNavigation() {
     svpLog("🎯 Hunt flag detected — tự động chạy seat selector...", "green");
     await sleep(1000);
     await maybeRun(true);
+    return;
+  }
+
+  // Nếu đang ở trang checkout/form → điền form luôn
+  const currUrl = location.href;
+  if (currUrl.includes("/checkout") || currUrl.includes("/order/") || currUrl.includes("/question-form")) {
+    svpLog("📝 Detect trang form — tự động điền...", "blue");
+    await sleep(1500); // chờ form load
+    try {
+      await autoFillForm(_cfg);
+    } catch(e) {
+      svpLog(`⚠️ Fill form lỗi: ${e.message}`, "yellow");
+    }
     return;
   }
 
