@@ -5,19 +5,40 @@ const API_PORT = 9279;
 const API_BASE = `http://127.0.0.1:${API_PORT}`;
 const CONFIG_POLL_MS = 3000;
 
+// Isolated world content scripts (load theo thứ tự dependencies)
 const CONTENT_SCRIPTS = [
+  // Tier 0 — utils + logger (phải load TRƯỚC mọi file dùng svpLog/SVP_MASK)
+  "src/utils/mask.js",
+  "src/shared/logger.js",
+  // Tier 1 — content utilities chung
   "src/content/utils.js",
+  "src/content/page_bridge_client.js",
   "src/content/api.js",
   "src/content/zone_matcher.js",
   "src/content/konva_clicker.js",
-  "src/content/hunt_1zone.js",
-  "src/content/hunt_ticketbox.js",
-  "src/content/seat_1zone_zone.js",
-  "src/content/seat_1zone_map.js",
-  "src/content/seat_ticketbox_zone.js",
-  "src/content/seat_ticketbox_map.js",
+  // Tier 2 — platform infrastructure (xhr capture + token manager + reserve API + captcha)
+  "src/platforms/1zone/xhr_intercept.js",
+  "src/platforms/ticketbox/xhr_intercept.js",
+  "src/platforms/ticketbox/token_manager.js",
+  "src/platforms/ticketbox/reserve_api.js",
+  "src/platforms/ticketbox/captcha.js",
+  // Tier 3 — platform modules
+  "src/platforms/1zone/hunt.js",
+  "src/platforms/ticketbox/hunt.js",
+  "src/platforms/1zone/seat_zone.js",
+  "src/platforms/1zone/seat_map.js",
+  "src/platforms/ticketbox/seat_zone.js",
+  "src/platforms/ticketbox/seat_map.js",
+  // Tier 3 — shared form filler
   "src/content/form_filler.js",
+  // Tier 4 — entry orchestrator
   "src/content/runner.js",
+];
+
+// MAIN world scripts (chạy trong page context — bypass isolated world cho XHR/fetch hook)
+const MAIN_WORLD_SCRIPTS = [
+  "src/injected/page_bridge.js",
+  "src/injected/network_hook.js",
 ];
 
 const TARGET_URLS = [
@@ -47,6 +68,15 @@ async function injectTab(tabId, url) {
   _injected.set(tabId, url);
 
   try {
+    // 1) Inject MAIN world scripts TRƯỚC (page_bridge → network_hook)
+    //    Hook phải sẵn sàng trước khi content scripts dispatch action.
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      files: MAIN_WORLD_SCRIPTS,
+    });
+
+    // 2) Inject content scripts (isolated world)
     await chrome.scripting.executeScript({
       target: { tabId },
       files: CONTENT_SCRIPTS,
@@ -185,6 +215,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "LOG") {
     sendLog(msg.msg, msg.color);
+  }
+
+  if (msg.type === "EVENT") {
+    // Structured event từ svpEvent() — forward TÊN tới /event endpoint
+    // Desktop dispatch theo event name để update UI (reserve card, tokens card...)
+    try {
+      const p = msg.payload || {};
+      // POST event endpoint
+      fetch(`${API_BASE}/event`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(p),
+        signal: AbortSignal.timeout(1500),
+      }).catch(() => {});
+      // Skip log noise events
+      const NOISE = new Set(["token.status", "hunt.poll"]);
+      if (!NOISE.has(p.event)) {
+        const summary = `[EVT ${p.platform}/${p.phase || "-"}] ${p.event}` +
+                        (p.durationMs != null ? ` (${Math.round(p.durationMs)}ms)` : "");
+        sendLog(summary, "blue");
+      }
+    } catch {}
+  }
+
+  if (msg.type === "BRIDGE_EVENT") {
+    // Event từ injected scripts (network_hook, page_bridge) → relay tóm tắt
+    try {
+      const ev = msg.event || "";
+      const d = msg.data || {};
+      // Chỉ log event reserve-critical, skip noise
+      const RELAY_EVENTS = [
+        "hook.installed", "hook.error", "hook.enabled", "hook.disabled",
+        "net.fetch.response", "net.xhr.response",
+        "net.fetch.error", "net.xhr.error",
+      ];
+      if (RELAY_EVENTS.includes(ev)) {
+        const summary = `[HOOK] ${ev}` +
+          (d.url ? ` ${d.method || ""} ${String(d.url).slice(0, 80)} → ${d.status || ""}` : "") +
+          (d.durationMs != null ? ` (${Math.round(d.durationMs)}ms)` : "");
+        sendLog(summary, ev.includes("error") ? "yellow" : "gray");
+      }
+    } catch {}
   }
 
   if (msg.type === "PING") {

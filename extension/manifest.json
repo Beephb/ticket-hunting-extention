@@ -47,5 +47,18 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/injected/page_bridge.js",
+        "src/injected/network_hook.js"
+      ],
+      "matches": [
+        "https://ticket.1zone.vn/*",
+        "https://ticketbox.vn/*"
+      ]
+    }
+  ]
 }

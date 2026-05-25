@@ -1,0 +1,80 @@
+# ─── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual env
+venv/
+env/
+ENV/
+.venv/
+
+# ─── Logs & Runtime ─────────────────────────────────────────────────────────
+*.log
+hunt.log
+app/hunt.log
+app/*.log
+
+# Config có thể chứa data cá nhân (name/phone/email/address user)
+# Comment dòng dưới nếu muốn share config template
+app/config.json
+
+# ─── Test artifacts ─────────────────────────────────────────────────────────
+# HAR file proxy capture chứa cookies/tokens — KHÔNG bao giờ commit
+*.har
+tests/captures/
+tests/scratch/
+
+# Test outputs
+*.test.log
+test_output/
+
+# ─── IDE & Editor ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ─── Chrome Extension build artifacts ───────────────────────────────────────
+extension/dist/
+extension/build/
+extension/*.zip
+extension/*.crx
+extension/*.pem
+extension/.crx-key
+
+# ─── Node (nếu sau này thêm tooling) ────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# ─── Claude Code session data ──────────────────────────────────────────────
+.claude/
+.claude-cache/
+
+# ─── OS specific ────────────────────────────────────────────────────────────
+$RECYCLE.BIN/
+System Volume Information/
+
+# ─── Sensitive / Local override ─────────────────────────────────────────────
+*.local
+*.secret
+*.env
+.env
+.env.local
+secrets.json
+credentials.json

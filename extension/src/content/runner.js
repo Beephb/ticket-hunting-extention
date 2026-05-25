@@ -85,10 +85,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
   if (msg.type === "STOP_HUNT") {
+    // Set global stop flag — seat_*.js loops sẽ check và abort
+    svpRequestStop?.();
     stopHunt1Zone?.();
     stopHuntTicketbox?.();
     _running = false;
-    svpLog("🛑 Hunt đã dừng", "yellow");
+    svpLog("🛑 Hunt + seat selection đã dừng (stop flag set)", "yellow");
     sendResponse({ ok: true });
     return;
   }
@@ -117,6 +119,7 @@ async function startHunt(autoSeat = true) {
   if (!_cfg) { svpLog("❌ Chưa có config", "red"); return; }
   const platform = detectPlatform();
   if (!platform) { svpLog("⚠️ Không phải trang 1Zone/Ticketbox", "yellow"); return; }
+  svpResetStop?.();  // reset stop flag khi start mới
   _running = true;
   svpLog(`🏹 Bắt đầu Hunt: ${platform}${autoSeat ? " (+ auto chọn ghế)" : " (chỉ hunt)"}`, "blue");
   startHuntIndicator(_cfg);
@@ -314,6 +317,7 @@ async function maybeRun(force = false) {
     return;
   }
 
+  svpResetStop?.();  // reset stop flag khi start seat selection
   _running = true;
   await sleep(800);
   try {

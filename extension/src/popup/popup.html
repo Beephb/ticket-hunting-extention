@@ -55,6 +55,17 @@
     max-height: 70px; overflow-y: auto; margin-bottom: 8px; line-height: 1.5; }
 
   .footer { padding: 6px 16px 10px; text-align: center; font-size: 10px; color: #334155; }
+  .clock-box {
+    display: flex; align-items: center; justify-content: space-between;
+    background: #0d1117; border: 1px solid #1e293b; border-radius: 8px;
+    padding: 6px 10px; margin-bottom: 8px;
+  }
+  .clock-label { font-size: 10px; color: #64748b; }
+  .clock-value {
+    font-family: 'Consolas', monospace;
+    font-size: 14px; font-weight: 700; color: #22c55e;
+  }
+  .clock-sync { font-size: 9px; color: #64748b; margin-left: 4px; }
 </style>
 </head>
 <body>
@@ -63,6 +74,14 @@
   <div class="sub" id="sub-text">v2.0.0 — Đang kiểm tra App...</div>
 </div>
 <div class="body">
+  <div class="clock-box">
+    <span class="clock-label">🕐 Giờ chính xác</span>
+    <span>
+      <span class="clock-value" id="clock-value">--:--:--.---</span>
+      <span class="clock-sync" id="clock-sync">đang sync...</span>
+    </span>
+  </div>
+
   <div class="status-row">
     <div class="dot" id="app-dot"></div>
     <div class="status-text" id="app-status">Đang kết nối Desktop App...</div>

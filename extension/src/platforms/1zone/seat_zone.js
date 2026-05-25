@@ -268,13 +268,16 @@ async function clickZoneKonva1Z(zone) {
   const offsets = [[0,0],[5,0],[-5,0],[0,5],[0,-5]];
 
   for (const p of points.slice(0, 10)) {
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort Konva click", "yellow"); return false; }
     const bx = p.x, by = p.y;
     const hit = elemAt(bx, by);
     svpLog(`🎯 Thử click zone ${zone.name}: mode=${p.mode} point=(${bx.toFixed(1)},${by.toFixed(1)}) hit=${hit}`, "blue");
 
     for (const [dx, dy] of offsets) {
+      if (svpShouldStop()) return false;
       await realClick(bx + dx, by + dy);
       for (let i = 0; i < 8; i++) {
+        if (svpShouldStop()) return false;
         await sleep(100);
         if (dialog1ZZoneVisible()) {
           svpLog(`✅ Popup quantity đã mở: ${zone.name} | point=(${(bx+dx).toFixed(1)},${(by+dy).toFixed(1)})`, "green");
@@ -344,12 +347,14 @@ async function setQuantity1Z(quantity) {
 
   // Chờ dialog visible + plus button
   for (let i = 0; i < 40; i++) {
+    if (svpShouldStop()) return false;
     const info = getUiInfo1Z();
     if (info.dialogVisible && info.plus) break;
     await sleep(100);
   }
 
   for (let attempt = 0; attempt < 40; attempt++) {
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort setQuantity", "yellow"); return false; }
     const info = getUiInfo1Z();
     if (!info.dialogVisible) return false;
     const cur = info.qty;
@@ -377,6 +382,7 @@ async function waitTurnstile1Z(timeoutMs = 8000) {
   const start = Date.now();
   let lastLen = 0;
   while (Date.now() - start < timeoutMs) {
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort waitTurnstile", "yellow"); return false; }
     const info = getUiInfo1Z();
     lastLen = info.turnstileLen || 0;
     if (lastLen > 120) {
@@ -390,6 +396,8 @@ async function waitTurnstile1Z(timeoutMs = 8000) {
 }
 
 // ── Click Tiếp tục và chờ navigate sang checkout ─────────────────────────────
+// Stage 3 refactor: dùng XHR hook capture orderId thay vì poll URL.
+// Hook là signal authoritative (server explicit confirm); URL change là fallback.
 
 async function clickPayAndWait1Z(calendarId) {
   await waitTurnstile1Z(8000);
@@ -400,31 +408,85 @@ async function clickPayAndWait1Z(calendarId) {
     return true;
   }
 
+  // Setup hook capture watch TRƯỚC khi click
+  const capture = window.__SVP_1Z_CAPTURE__;
+  let orderIdResult = null;
+  if (capture) {
+    capture.clearReserveCache();
+    capture.waitForOrderId(10000).then(r => { orderIdResult = r; });
+  } else {
+    svpLog("⚠️ __SVP_1Z_CAPTURE__ chưa load — fallback dùng URL detect", "yellow");
+  }
+
   svpLog(`🖱️ Click button: Tiếp tục`, "blue");
   info.pay.el.click();
 
-  // Chờ navigate sang checkout (tối đa 15s)
+  // Chờ: ưu tiên orderId từ hook, fallback URL change.
   const deadline = Date.now() + 15000;
+  let dialogClosedAt = null;
+
   while (Date.now() < deadline) {
-    await sleep(300);
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort clickPay wait", "yellow"); return false; }
+    await sleep(150);
+
+    // Priority 1: Hook capture orderId hoặc error (signal mạnh nhất)
+    if (orderIdResult) {
+      if (orderIdResult.success && orderIdResult.orderId) {
+        svpLog(`✅ Reserve OK — orderId=${orderIdResult.orderId}`, "green");
+        // Đợi nav xảy ra (tối đa 5s nữa)
+        const navDeadline = Date.now() + 5000;
+        while (Date.now() < navDeadline) {
+          const u = location.href;
+          if (u.includes("/checkout") || u.includes("/order/")) {
+            svpLog(`✅ Navigate checkout xong`, "green");
+            return true;
+          }
+          await sleep(200);
+        }
+        svpLog(`✅ Có orderId nhưng URL chưa navigate — coi như success`, "green");
+        return true;
+      } else if (orderIdResult.error) {
+        const ec = orderIdResult.error.errorCode;
+        const msg = orderIdResult.error.message || "";
+        svpLog(`❌ Reserve FAIL — errorCode=${ec} msg=${msg}`, "red");
+        return false;
+      }
+    }
+
+    // Priority 2: URL change (hook miss hoặc event bị nuốt)
     const url = location.href;
     if (url.includes("/checkout") || url.includes("/order/")) {
-      svpLog(`✅ Đã navigate sang checkout`, "green");
+      if (orderIdResult?.orderId) {
+        svpLog(`✅ Đã navigate sang checkout (orderId=${orderIdResult.orderId})`, "green");
+      } else {
+        svpLog(`✅ Đã navigate sang checkout (URL detect, hook chưa thấy orderId)`, "yellow");
+      }
       return true;
     }
+
+    // Priority 3: Dialog đóng — chờ 1.5s xem có nav không
     if (!dialog1ZZoneVisible()) {
-      await sleep(500);
-      if (location.href.includes("/checkout")) {
-        svpLog(`✅ Đã navigate sang checkout`, "green");
-        return true;
+      if (!dialogClosedAt) dialogClosedAt = Date.now();
+      if (Date.now() - dialogClosedAt > 1500) {
+        if (location.href.includes("/checkout") || location.href.includes("/order/")) {
+          svpLog(`✅ Navigate checkout sau khi popup đóng`, "green");
+          return true;
+        }
+        svpLog("⚠️ Popup đóng nhưng chưa navigate + hook chưa capture. Có thể reserve fail silent.", "yellow");
+        return false;
       }
-      svpLog("⚠️ Popup đóng nhưng chưa navigate checkout", "yellow");
-      return true;
+    } else {
+      dialogClosedAt = null;
     }
   }
 
-  svpLog("⚠️ Timeout chờ navigate checkout sau khi bấm Tiếp tục", "yellow");
-  return true;
+  // Timeout cuối
+  if (orderIdResult?.success) {
+    svpLog(`⏰ Timeout chờ navigate nhưng có orderId=${orderIdResult.orderId} — coi như success`, "yellow");
+    return true;
+  }
+  svpLog("⚠️ Timeout chờ orderId + navigate sau khi bấm Tiếp tục", "yellow");
+  return false;
 }
 
 // ── Main flow: 1Zone seat_zone ────────────────────────────────────────────────

@@ -1,68 +1,174 @@
 # Săn Vé Pro v2.0
 
-Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Ticketbox**, chạy trực tiếp trong Chrome thông qua Extension — không cần mở Chrome với flag đặc biệt, không cần Playwright.
+Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Ticketbox**, chạy trực tiếp trong Chrome thông qua Extension. Không cần Playwright, không cần Chrome flag đặc biệt — extension đọc cookie/session sẵn có của user.
+
+**Tốc độ reserve thực đo:**
+- **Ticketbox API-first: ~235ms** (vs Konva click cũ ~3-5s, nhanh hơn 15-20x)
+- **1Zone Tier P: ~3-5s** (bottleneck là Turnstile, không thể bypass)
 
 ---
 
-## Kiến trúc tổng quan
+## ✨ Tính năng đã hoàn chỉnh
 
-```
-Desktop App (Python)          Chrome Extension
-┌─────────────────┐          ┌──────────────────────────────────┐
-│  Giao diện cấu  │◄────────►│  background.js (singleton)       │
-│  hình + Log     │  HTTP    │  - Inject content scripts        │
-│  port 9279      │  API     │  - Poll config từ App            │
-└─────────────────┘          │  - executeScript (Konva/Seats.io)│
-                             └──────────────┬───────────────────┘
-                                            │ inject
-                                            ▼
-                             ┌──────────────────────────────────┐
-                             │  Content Scripts (tab)           │
-                             │  runner.js → điều phối           │
-                             │  hunt_*.js → săn vé              │
-                             │  seat_*.js → chọn ghế            │
-                             │  form_filler.js → điền form      │
-                             └──────────────────────────────────┘
-```
+| Module | Platform | Status |
+|---|---|---|
+| Hunt poll API + queue-aware | 1Zone | ✅ |
+| Hunt poll API + queue-aware | Ticketbox | ✅ |
+| Reserve API-first (submit-ticket-info) | Ticketbox | ✅ 235ms |
+| Reserve hybrid (Konva click + frontend sign) | 1Zone | ✅ |
+| XHR hook capture orderId/bookingCode | Cả 2 | ✅ |
+| Konva fallback khi API fail | Ticketbox | ✅ |
+| Auto navigate checkout + fill form | Cả 2 | ✅ |
+| Captcha pause gate (chờ user solve) | Ticketbox | ✅ |
+| Stop hunt signal (dừng tức thì) | Cả 2 | ✅ |
+| Desktop UI: clock realtime sync time.is | — | ✅ |
+| Desktop UI: reserve card hiển thị bookingCode + countdown | — | ✅ |
+| Desktop UI: tokens card hiển thị JWT + captcha cache | — | ✅ |
+| Popup clock realtime | — | ✅ |
+| Log mask PII (token/email/phone) | — | ✅ |
+
+## 🚫 Tính năng KHÔNG làm + lý do
+
+| Tính năng | Lý do |
+|---|---|
+| Ticketbox extension tự refresh access_token | Endpoint `/refresh_token` có field `signature` SHA-256 unknown algorithm — frontend tự handle |
+| 1Zone Tier E3 (mutate body để bypass UI click) | Phase A1 test 2026-05-23: `x-signature` cover body bytes, mutation → 401 |
+| Captcha overlay UI custom | Ticketbox cache token 1h trong `tkc_xxx` — solve 1 lần dùng nhiều giờ |
+| Auto thanh toán | Payment luôn user-in-the-loop để tránh charge nhầm |
 
 ---
 
-## Cấu trúc thư mục
+## 🏗 Kiến trúc tổng quan
 
 ```
-SanVePro/
-├── app/
-│   ├── main.py              # Desktop App — giao diện + localhost API
-│   ├── requirements.txt
-│   └── config.json          # Tự tạo khi lưu lần đầu
+┌─────────────────────────┐          ┌──────────────────────────────────────┐
+│  Desktop App (Python)   │          │  Chrome Extension (MV3)              │
+│  ─────────────────────  │          │  ──────────────────────────────────  │
+│  CustomTkinter UI       │          │  background.js (service worker)      │
+│  • Tab Chọn Vé          │  HTTP    │  • Inject content scripts            │
+│  • Tab Thông Tin        │ ◄──────► │  • Inject MAIN world hook            │
+│  • Reserve card         │  port    │  • Relay log + event tới desktop     │
+│  • Tokens card          │  9279    │  • Keyboard shortcuts Alt+1/2/3      │
+│  • Clock sync time.is   │          └──────────────┬───────────────────────┘
+│  • Log realtime         │                         │ executeScript
+└─────────────────────────┘                         ▼
+                                     ┌──────────────────────────────────────┐
+                                     │  Per-tab scripts                     │
+                                     │  ──────────────────────────────────  │
+                                     │  MAIN world (page context):          │
+                                     │    page_bridge.js — postMessage      │
+                                     │    network_hook.js — patch XHR+fetch │
+                                     │                                      │
+                                     │  Isolated world (content):           │
+                                     │    runner.js — điều phối trung tâm   │
+                                     │    page_bridge_client.js — relay     │
+                                     │    platforms/1zone/* — flow 1Zone    │
+                                     │    platforms/ticketbox/* — flow TB   │
+                                     └──────────────────────────────────────┘
+```
+
+### Chiến lược 2 platform
+
+| | Ticketbox | 1Zone |
+|---|---|---|
+| Strategy | **Pure API-first** | **Hybrid frontend-hook** |
+| Token | `TBoxJWT` cookie (TTL 120s, frontend tự refresh) | JWT localStorage + Turnstile + `x-signature` |
+| Reserve | `POST /event/api/v1/bookings/submit-ticket-info` direct | Click UI → frontend tự sign + send |
+| Fallback | Konva click cũ | (Konva LÀ flow chính) |
+| Output | `bookingCode` | `orderId` |
+| Latency | ~235ms | ~3-5s |
+
+---
+
+## 📂 Cấu trúc thư mục chi tiết
+
+```
+SanVePro_v2/
 │
-└── extension/
-    ├── manifest.json
-    ├── icons/
-    └── src/
-        ├── background/
-        │   └── background.js        # Service worker singleton
-        ├── content/
-        │   ├── utils.js             # Helpers dùng chung
-        │   ├── api.js               # Fetch API 1Zone/Ticketbox
-        │   ├── zone_matcher.js      # Match zone theo tên ưu tiên
-        │   ├── konva_clicker.js     # Click Konva canvas qua executeScript
-        │   ├── hunt_1zone.js        # Hunt vé 1Zone
-        │   ├── hunt_ticketbox.js    # Hunt vé Ticketbox
-        │   ├── seat_1zone_zone.js   # Chọn khu (zone) 1Zone
-        │   ├── seat_1zone_map.js    # Chọn ghế cụ thể 1Zone (Seats.io)
-        │   ├── seat_ticketbox_zone.js  # Chọn khu Ticketbox (Konva)
-        │   ├── seat_ticketbox_map.js   # Chọn ghế cụ thể Ticketbox
-        │   ├── form_filler.js       # Điền form checkout
-        │   └── runner.js            # Điều phối trung tâm
-        └── popup/
-            ├── popup.html
-            └── popup.js
+├── README.md                              # File này
+├── .gitignore                             # Loại trừ logs, config user, HAR file
+│
+├── app/                                   # ── DESKTOP APP (Python) ──
+│   ├── main.py                            # Toàn bộ desktop: UI + API server + time sync
+│   ├── requirements.txt                   # customtkinter
+│   └── config.json                        # Config user (gitignored, tự tạo)
+│
+├── extension/                             # ── CHROME EXTENSION (MV3) ──
+│   ├── manifest.json                      # Permissions, web_accessible_resources
+│   ├── icons/                             # icon16/48/128.png
+│   └── src/
+│       ├── background/
+│       │   └── background.js              # Service worker — inject orchestrator
+│       │                                  #   + Poll config /3s, relay log/event
+│       │                                  #   + 2-step inject (MAIN trước, content sau)
+│       │
+│       ├── popup/
+│       │   ├── popup.html                 # Toolbar UI (icon extension)
+│       │   └── popup.js                   # Control panel + clock realtime
+│       │
+│       ├── utils/
+│       │   └── mask.js                    # PII/token mask helpers (maskToken/Email/Phone)
+│       │
+│       ├── shared/
+│       │   └── logger.js                  # svpLog + svpEvent (structured)
+│       │                                  #   tự mask trước khi gửi background
+│       │
+│       ├── injected/                      # ── MAIN WORLD (page context) ──
+│       │   ├── page_bridge.js             # Bridge bằng window.postMessage
+│       │   └── network_hook.js            # Patch fetch + XMLHttpRequest
+│       │                                  #   Match URL patterns, emit event
+│       │
+│       ├── content/                       # ── ISOLATED WORLD ──
+│       │   ├── runner.js                  # Entry orchestrator
+│       │   │                              #   - Message router (HUNT/RUN/STOP)
+│       │   │                              #   - Hunt flag handler post-navigate
+│       │   │                              #   - Indicator badge + toast
+│       │   │                              #   - SPA navigation watcher
+│       │   ├── page_bridge_client.js      # Receive postMessage từ MAIN world
+│       │   │                              #   Forward bridge event lên background
+│       │   ├── utils.js                   # sleep, normText, realClick, detectPlatform
+│       │   │                              #   + svpShouldStop / svpRequestStop
+│       │   ├── api.js                     # Legacy API helpers (1Zone + TB)
+│       │   ├── zone_matcher.js            # Token-based zone fuzzy match
+│       │   ├── konva_clicker.js           # Konva click helpers + runInPage wrapper
+│       │   └── form_filler.js             # Auto-fill form checkout (shared 2 platforms)
+│       │
+│       └── platforms/                     # ── PER-PLATFORM MODULES ──
+│           ├── 1zone/
+│           │   ├── hunt.js                # Poll summary API 200ms + queue-aware
+│           │   ├── xhr_intercept.js       # Capture add-to-cart response → orderId
+│           │   ├── seat_zone.js           # Konva click zone → modal qty → Tiếp tục
+│           │   └── seat_map.js            # Seats.io chart.trySelectObjects
+│           │
+│           └── ticketbox/
+│               ├── hunt.js                # Poll event API 300ms + queue/captcha detect
+│               ├── xhr_intercept.js       # Capture 9 endpoints (login/refresh/captcha/reserve/checkout)
+│               ├── token_manager.js       # Read-only TBoxJWT cookie + parse JWT exp
+│               │                          #   buildHeaders() cho mọi API call
+│               ├── reserve_api.js         # submitTicketInfo() direct POST
+│               │                          #   buildZoneItems / buildMapItems helpers
+│               ├── captcha.js             # Captcha detector + waitForResolved
+│               │                          #   Proactive wait 6s + pause/resume
+│               ├── seat_zone.js           # API-first reserve → fallback Konva
+│               └── seat_map.js            # API-first reserve → fallback Konva
+│
+└── tests/
+    └── phase_a1_signature_test.js         # Snippet test 1Zone signature (đã chạy 2026-05-23)
+                                           # Kết quả: BODY_SIGNED → Tier E3 disable vĩnh viễn
 ```
+
+### File quan trọng nhất (đọc theo thứ tự)
+
+1. **`app/main.py`** — Desktop entry point, API server port 9279
+2. **`extension/manifest.json`** — Permissions + web_accessible_resources
+3. **`extension/src/background/background.js`** — Inject orchestrator
+4. **`extension/src/content/runner.js`** — Content script entry, message router
+5. **`extension/src/platforms/ticketbox/reserve_api.js`** — API-first reserve flow
+6. **`extension/src/injected/network_hook.js`** — XHR/fetch patch trong MAIN world
 
 ---
 
-## Cài đặt
+## 🚀 Cài đặt
 
 ### 1. Desktop App
 
@@ -72,197 +178,243 @@ pip install customtkinter
 python main.py
 ```
 
-App khởi động **localhost API tại port 9279** — Extension đọc config từ đây.
+→ Khởi động API tại `http://127.0.0.1:9279`
 
 ### 2. Chrome Extension
 
-1. Mở Chrome → `chrome://extensions/`
+1. Mở `chrome://extensions/`
 2. Bật **Developer mode** (góc trên phải)
 3. Click **Load unpacked** → chọn thư mục `extension/`
+4. Pin icon extension cho dễ access
 
-### 3. Đổi phím tắt (tuỳ chọn)
+### 3. Phím tắt (mặc định)
 
-Vào `chrome://extensions/shortcuts` để remap phím tắt.
+| Phím | Action |
+|---|---|
+| `Alt+1` | Hunt + auto chọn ghế + điền form |
+| `Alt+2` | Chỉ chọn ghế trên trang hiện tại |
+| `Alt+3` | Chỉ điền form checkout |
+
+Đổi tại `chrome://extensions/shortcuts`.
 
 ---
 
-## Cấu hình
+## 📋 Cấu hình
 
-Điền trong Desktop App rồi bấm **Lưu config**:
+Trong Desktop App, điền các field rồi bấm **Lưu config**:
+
+### Tab "Chọn Vé"
 
 | Trường | Mô tả |
 |---|---|
-| Họ tên / SĐT / Email / Địa chỉ | Dùng để tự điền form checkout |
-| Platform | `1Zone` hoặc `Ticketbox` |
-| Kiểu chọn vé | `seat_zone` (chọn khu) hoặc `seat_map` (chọn ghế cụ thể) |
-| Ưu tiên zone/khu | Mỗi dòng 1 zone, thử theo thứ tự từ trên xuống |
-| Số lượng vé | 1, 2, 3... |
+| **Nền tảng** | `1Zone` hoặc `Ticketbox` |
+| **Kiểu chọn ghế** | `Chọn zone (khu)` hoặc `Chọn ghế cụ thể` |
+| **Ưu tiên** | Tên khu / cú pháp ghế (xem dưới) |
+| **Số lượng vé** | 1, 2, 3... |
+| **Bật bot tự động** | Tick để cho phép Alt+1 chạy auto |
+
+### Tab "Thông Tin"
+
+| Trường | Dùng để |
+|---|---|
+| Họ tên | Auto-fill form checkout |
+| Số điện thoại | Auto-fill form checkout |
+| Email | Auto-fill form checkout |
+| Địa chỉ | Auto-fill form 1Zone |
 
 ### Cú pháp nhập ưu tiên
 
-**seat_zone** — tên khu vực, mỗi dòng 1 khu:
+**Mode `Chọn zone (khu)`** — tên khu, mỗi dòng 1 ưu tiên:
 ```
 HIÊN 1
 HIÊN 2
 VIP A
 ```
 
-**seat_map** — hỗ trợ nhiều dạng:
+**Mode `Chọn ghế cụ thể`** — hỗ trợ nhiều dạng:
 ```
-CUỐN LẤY ANH ĐI     ← tên khu (text match)
-M:18                 ← hàng M ghế 18
-M:15-20              ← hàng M ghế 15 đến 20
-A-D:5-15             ← hàng A đến D, ghế 5 đến 15
-M:18,20,22           ← hàng M các ghế cụ thể
+Zone 2                 ← chỉ tên khu (chọn ghế bất kỳ trong khu)
+M:18                   ← hàng M, ghế 18
+M:15-20                ← hàng M, ghế 15 đến 20
+M:18,20,22             ← hàng M, các ghế cụ thể
+A-D:5-15               ← hàng A đến D, ghế 5 đến 15
+Zone 2|M:8-18          ← khu Zone 2 + hàng M + ghế 8-18
+Zone 2|M               ← khu Zone 2 + hàng M (bất kỳ ghế)
+M                      ← chỉ hàng M (bất kỳ zone, bất kỳ ghế)
+M-19                   ← exact seat M-19
 ```
 
 ---
 
-## Sử dụng
-
-### Popup Extension
-
-| Nút | Phím tắt | Chức năng |
-|---|---|---|
-| 🏹 Hunt + chọn tự động | `Alt+1` | Săn vé → chọn ghế → điền form tự động hoàn toàn |
-| ▶ Chọn ghế | `Alt+2` | Chỉ chọn ghế trên trang hiện tại |
-| 📝 Điền form | `Alt+3` | Chỉ điền form checkout |
-| 🔍 Chỉ Hunt | — | Săn vé, navigate vào booking rồi dừng |
-| ⏹ Dừng Hunt | — | Dừng poller + clicker |
-
-### Flow tự động (Alt+1)
+## 🎯 Flow tự động (Alt+1)
 
 ```
-Bấm Alt+1
+Bấm Alt+1 trên tab event
     ↓
 Hunt: Poll API mỗi 200-300ms
     ↓ (khi có vé)
 Direct nav vào /booking/ hoặc /select-ticket
-    ↓ (nếu bị queue → chờ tối đa 120s)
-Chọn ghế (Konva click / Seats.io select)
-    ↓ (nếu thất bại → toast thông báo, user tự chọn)
-Click Tiếp tục / Thanh toán
-    ↓
-Tự điền form checkout
+    ↓ (nếu bị queue → chờ tối đa 120-180s, không reload)
+[TICKETBOX]:                          [1ZONE]:
+  Captcha gate                         (Không có captcha)
+  (chờ user solve nếu hiện)
+    ↓                                    ↓
+  Try API submit-ticket-info           Konva click zone
+  (timeout 1500ms)                       ↓
+    ↓ success                          Modal qty → set quantity
+  bookingCode capture                    ↓
+    ↓                                  Wait Turnstile token
+  Navigate question-form                 ↓
+                                       Click Tiếp tục
+    ↓ fail (fallback)                    ↓
+  Konva click → modal qty → Tiếp tục   Hook capture orderId
+                                         ↓
+    ↓                                  Navigate /checkout?orderId=xxx
+  Form auto-fill                         ↓
+    ↓                                  Form auto-fill
+  User confirm thanh toán              User confirm thanh toán
 ```
 
 ---
 
-## Chi tiết kỹ thuật
+## 🔍 Trạng thái thực tế từng platform
 
-### Hunt 1Zone
-- Poll `https://prod.1zone.vn/ticketing/api/v4/ticket-summary/get-summary-event/{eventId}?type=group&calendarId={id}` mỗi **200ms**
-- Khi `availableTickets > 0` → `location.href = /booking/{slug}?calendarId={id}`
-- Queue-aware: chờ DOM detect thoát queue tối đa **120s**, không reload không click
-- Fallback JS Clicker: nếu không lấy được booking URL hoặc direct nav fail → inject MutationObserver + setInterval(150ms) click nút "Mua vé"
+### Ticketbox (Production-ready)
 
-### Hunt Ticketbox
-- Poll `https://api-v2.ticketbox.vn/gin/api/v2/events/{eventId}` mỗi **300ms**
-- Tìm showing tốt nhất: ưu tiên `isSalable=true` + cùng ngày + id lớn hơn
-- Direct nav: GET showings → GET seatmap → `location.href = /events/{id}/bookings/{showingId}/select-ticket`
-- State detection sau navigate: `queue | captcha | select | form`
-- Queue-aware: chờ tối đa **180s**
+```
+✅ Hunt poll 300ms detect mở bán
+✅ Captcha pause gate (đợi user solve, max 90s)
+✅ API-first reserve submit-ticket-info (~235ms)
+✅ bookingCode capture từ response trực tiếp
+✅ Konva click fallback khi API fail
+✅ Navigate question-form auto, form fill auto
+✅ Stop signal dừng tức thì
+```
 
-### Konva Click (1Zone seat_zone, Ticketbox seat_zone)
-- Dùng `chrome.scripting.executeScript` với `world: "MAIN"` để truy cập `window.Konva` thật
-- Không bị CSP chặn (khác với script injection)
-- Tọa độ: `viewportX = box.left + (konvaX / stageW) * box.width`
-- Thử nhiều điểm click, detect dialog/popup mở là thành công
+**Pre-conditions:**
+- Login Ticketbox (cookie TBoxJWT sẵn)
+- Solve captcha slide 1 lần / suất diễn (token cache TTL 1h)
 
-### Seats.io (1Zone seat_map)
-- Truy cập `window.seatsio.charts[0]` qua `executeScript`
-- Label format: `{zoneName}-{rowName}-{code}` (ví dụ: `CUỐN LẤY ANH ĐI-M-18`)
-- Retry loop: nếu ghế bị "Ignoring" (hết/held) → bỏ qua, thử cụm ghế tiếp theo
-- Tối đa 30 lần retry
+### 1Zone (Production-ready)
 
-### Zone Matching
-- Token-based: `VIP` không match `VIP A`, phải match đúng token
-- Score: exact = 1000, partial = 700-850
-- Ưu tiên theo thứ tự danh sách config
+```
+✅ Hunt poll 200ms detect availableTickets > 0
+✅ Queue handler tối đa 120s
+✅ Konva click zone / Seats.io select seat
+✅ Wait Turnstile (~3-5s)
+✅ XHR hook capture orderId từ add-to-cart response
+✅ Navigate checkout auto
+✅ Stop signal dừng tức thì
+```
 
----
-
-## Nguyên tắc kỹ thuật quan trọng
-
-1. **Không POST add-to-cart trực tiếp** — luôn click button UI thật để frontend tự sinh Turnstile token
-2. **Không dùng CDP/Playwright** — Extension chạy trong Chrome thật, có đầy đủ cookie/session
-3. **executeScript world=MAIN** — bypass CSP để truy cập window.Konva, window.seatsio
-4. **element.click() thay vì MouseEvent** — React synthetic event system nhận được
-5. **Queue-aware** — không reload, không click, chờ redirect tự nhiên
+**Pre-conditions:**
+- Login 1Zone (JWT trong localStorage)
+- Mở tab booking trước (Turnstile cần render trong page thật)
 
 ---
 
-## Trạng thái các module
+## 🛠 Quy tắc kỹ thuật
 
-| Module | Platform | Trạng thái |
-|---|---|---|
-| Hunt + API Poller | 1Zone | ✅ Hoàn chỉnh |
-| Hunt + API Poller | Ticketbox | ✅ Hoàn chỉnh |
-| seat_zone (Konva) | 1Zone | ✅ Hoàn chỉnh |
-| seat_map (Seats.io) | 1Zone | ✅ Hoàn chỉnh |
-| seat_zone (Konva) | Ticketbox | ✅ Hoàn chỉnh |
-| seat_map | Ticketbox | ✅ Hoàn chỉnh |
-| Form fill | 1Zone | ✅ Hoàn chỉnh |
-| Form fill | Ticketbox | ✅ Hoàn chỉnh |
-| Auto hunt → seat → form | Cả 2 | ✅ Hoàn chỉnh |
+1. **Page-driven cho cả 2 platform** — fingerprint tự nhiên, ít bị detect bot
+2. **Payment luôn user-in-the-loop** — không auto charge để tránh sai vé
+3. **Token có TTL ngắn** → frontend tự refresh, extension chỉ đọc
+4. **MAIN world XHR hook** — bypass isolated world để patch fetch/XHR thật
+5. **Log mask PII** — token/email/phone đều mask trước khi gửi desktop
+6. **Stop signal cooperative** — mọi loop dài check `svpShouldStop()` để abort
 
 ---
 
-## Debug
+## 🐞 Debug
 
 ### Console Chrome (F12, filter `[SVP]`)
 
 ```
 [SVP] ✅ Săn Vé Pro v2.0.0 injected
-[SVP] 🏹 Bắt đầu Hunt: 1Zone (+ auto chọn ghế)
-[SVP] 📡 API Poller — poll mỗi 200ms
-[SVP] 🎯 10 vé available! Chuyển sang direct nav...
+[SVP] 🔐 TB token (cookie-based) — hasToken=true valid=true remaining=87s user=4445570
+[SVP] 🎫 TB reserve API client loaded
+[SVP] 🧩 TB captcha helper loaded (v2)
+[SVP] 🏹 Bắt đầu Hunt: Ticketbox (+ auto chọn ghế)
+[SVP] 📡 Ticketbox API Poller — poll event mỗi 300ms
+[SVP] 🎯 Showing mở bán: 27182005198633 (Mua vé ngay)
 [SVP] 🎯 Hunt flag detected — tự động chạy seat selector...
-[SVP] 🔎 Konva zone: HIÊN 1 | candidates=18
-[SVP] ✅ Popup quantity đã mở: HIÊN 1
-[SVP] ✅ Quantity đúng: 2
-[SVP] ✅ Turnstile token ready: len=1050
-[SVP] ✅ Đã navigate sang checkout
+[SVP] 🎫 TB reserve API → tt1070552/sec11416/x1[584860]
+[SVP] ✅ TB reserve OK (235ms) — bookingCode=ac2bc08c-... expireIn=899s
+[SVP] 🎫 API-first reserve OK
 [SVP] 📝 Tự động điền form checkout...
-[SVP] ✅ Đã điền form 1Zone
+[SVP] ✅ Đã điền form Ticketbox
 ```
 
-### Red-dot test (kiểm tra tọa độ Konva)
+### Desktop App log realtime
 
-Chạy trong Console khi đang ở trang booking:
+Log textbox bên phải, mọi event extension đều forward về (mask PII trước):
+```
+[23:47:08] 🕐 Time synced (google): offset=-42ms
+[23:47:12] [EXT] ✅ Săn Vé Pro v2.0.0 injected
+[23:47:13] [EXT] 🎫 TB reserve API → tt1070552/sec11416/x1[584860]
+[23:47:13] [EXT] ✅ TB reserve OK (235ms) — bookingCode=ac2bc08c-...
+```
 
+### Status snapshot từ extension
+
+Mở Console tab booking (context "Săn Vé Pro" trong dropdown):
 ```js
-(() => {
-  const TARGET = "HIÊN 1";
-  const stage = window.Konva?.stages?.[0];
-  if (!stage) return console.log("NO_STAGE");
-  const node = stage.find("Path").find(p =>
-    !p.attrs?.disabled &&
-    String(p.attrs?.text || "").toUpperCase().includes(TARGET.toUpperCase())
-  );
-  if (!node) return console.log("ZONE_NOT_FOUND");
-  const box = stage.container().getBoundingClientRect();
-  const r = node.getClientRect();
-  const vx = box.left + (r.x + r.width/2) / stage.width() * box.width;
-  const vy = box.top  + (r.y + r.height/2) / stage.height() * box.height;
-  const dot = Object.assign(document.createElement("div"), {
-    style: `position:fixed;left:${vx}px;top:${vy}px;width:16px;height:16px;
-            background:red;border-radius:50%;z-index:999999;
-            pointer-events:none;transform:translate(-50%,-50%)`
-  });
-  document.body.appendChild(dot);
-  console.log("Red dot tại:", { vx, vy });
-})();
+window.__SVP_TB_TOKEN__.status()
+// → {hasAccessToken, accessTokenValid, accessTokenRemainingMs, userId, ...}
+
+window.__SVP_TB_CAPTCHA__.isVisible()
+// → true/false
+
+window.__SVP_HOOK__.status()  // MAIN world context
+// → {enabled: true, patterns: [...]}
 ```
-
-### Đổi phím tắt
-
-Vào `chrome://extensions/shortcuts` để remap `Alt+1/2/3`.
 
 ---
 
-## Known Issues
+## 📚 Tài liệu tham khảo
 
-- **Double log**: Mỗi dòng log hiện 2 lần do extension inject content script 2 lần (1 lần ở trang event, 1 lần ở trang booking). Không ảnh hưởng đến kết quả, đang nghiên cứu fix.
-- **Seats.io "Ignoring selection"**: Ghế đã sold/held — bot tự động bỏ qua và thử ghế tiếp theo.
-- **Turnstile**: Cần chờ token load (~3-5s) trước khi click Tiếp tục — bình thường.
+- **`tests/phase_a1_signature_test.js`** — Snippet test reverse 1Zone signature
+- Memory files trong `.claude/memory/`:
+  - `project-architecture.md` — Kiến trúc tổng quan
+  - `project-roadmap.md` — 5-stage implementation plan
+  - `ticketbox-token-format.md` — Cookie schema TBoxJWT chi tiết
+  - `onezone-signature-test.md` — Kết quả Phase A1
+  - `stage1/3/4_done.md` — Tracking các milestone
+
+---
+
+## 📊 Performance benchmark thực đo (2026-05-24)
+
+| Operation | Latency |
+|---|---|
+| Hunt poll cycle (Ticketbox) | 300ms |
+| Hunt poll cycle (1Zone) | 200ms |
+| API reserve Ticketbox | **235ms** |
+| Konva click reserve (1Zone) | 3-5s |
+| Captcha gate proactive wait | 6s |
+| Captcha solved → bot resume | 600-800ms |
+| Stop hunt signal → all loops abort | <1s |
+| Time sync (HTTP Date Google) | 1-2s mỗi 60s |
+
+---
+
+## ⚠️ Known Limitations
+
+| Issue | Workaround |
+|---|---|
+| Token Ticketbox expire trong flight (>30s idle) | Reload tab để frontend tự refresh |
+| Captcha hết TTL 1h | Solve lại slide trên frontend |
+| Hook fetch broken trên Ticketbox (Next.js override) | XHR hook vẫn alive → reserve responses vẫn capture |
+| Cloudflare/Ticketbox bot detect | Page-driven approach giảm rủi ro nhưng không zero |
+| 1Zone bundle deploy đổi DOM/Konva | Có Konva fallback nhưng vẫn cần test lại |
+
+---
+
+## 🗺 Roadmap tiếp theo (optional)
+
+| Việc | Effort | Status |
+|---|---|---|
+| Test E2E nhiều scenarios (race, alternates) | 1 ngày | Pending |
+| Wire alternates config vào seat_*.js | 2-3 giờ | Pending |
+| 1Zone fast paths (E1/E2/E4) | 1-2 tuần | Deferred (ROI thấp) |
+| Multi-account support | 3-5 ngày | Future |
+| Cloud sync config | 2-3 ngày | Future |

@@ -5,20 +5,20 @@
   "address": "biên hòa",
   "auto_seat": {
     "enabled": false,
-    "platform": "Ticketbox",
+    "platform": "1Zone",
     "seat_mode": "seat_map",
     "zone_priority": [
-      "VÉ THƯỜNG"
+      "ZONE 2"
     ],
-    "quantity": 1,
+    "quantity": 2,
     "seat_number_mode": "auto",
     "require_adjacent": false,
     "allow_split_seats": true,
     "priority_targets": [
-      "VÉ THƯỜNG"
+      "ZONE 2"
     ],
     "seat_map_priorities": [
-      "VÉ THƯỜNG"
+      "ZONE 2"
     ]
   }
 }

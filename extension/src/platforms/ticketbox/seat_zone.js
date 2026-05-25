@@ -118,54 +118,100 @@ async function resolveDateCandidates(eventId, showingId, urlDate) {
 }
 
 // ── Collect API zones từ showing + seatmap JSON ──────────────────────────────
-
-function* walkObj(obj) {
-  if (!obj) return;
-  if (Array.isArray(obj)) { for (const x of obj) yield* walkObj(x); return; }
-  if (typeof obj === "object") { yield obj; for (const v of Object.values(obj)) yield* walkObj(v); }
-}
+//
+// Schema verified 2026-05-24:
+//   showings/{id}.data.result.ticketTypes[] = [{id, name, shortName, status, statusName, price, ...}]
+//   seatmap/{id}.data.result.sections[]     = [{id, name, ticketTypeId, isReservingSeat, isStage, status, ...}]
+//
+// Pairing rule: 1 ticketType có thể có nhiều sections (vd big zone chia thành sub-areas).
+// Strategy:
+//   1. Match target name vs ticketTypes[].name/shortName → ticketTypeId
+//   2. Filter sections[] where section.ticketTypeId === found → mỗi section là 1 candidate
+//   3. Fallback: nếu không match ticketType, thử match section.name trực tiếp
+//
+// Fix bug 2026-05-24: code cũ dùng walkObj + heuristic, return sectionId=ticketTypeId
+// khi merge fuzzy match fail. Code mới đọc schema cứng → guaranteed correct.
 
 function collectApiZones(showJson, seatmapJson, target) {
+  const ticketTypes = showJson?.data?.result?.ticketTypes || [];
+  const sections    = seatmapJson?.data?.result?.sections || [];
+
   const candidates = [];
 
-  function consider(d, source) {
-    const name = d.ticketTypeName || d.sectionName || d.section_name ||
-      d.name || d.label || d.title || d.shortName || "";
-    if (!name) return;
-    const score = zoneScoreTb(target, name);
-    if (score <= 0) return;
-
-    let ticketTypeId = d.ticketTypeId || d.ticket_type_id ||
-      (("price" in d || "ticketTypeName" in d || "quantity" in d || "maxQuantity" in d) ? d.id : null);
-    let sectionId = d.sectionId || d.section_id;
-    if (sectionId == null && source === "seatmap") sectionId = d.id;
-
-    ticketTypeId = ticketTypeId != null && String(ticketTypeId).match(/^\d+$/) ? parseInt(ticketTypeId) : null;
-    sectionId = sectionId != null && String(sectionId).match(/^\d+$/) ? parseInt(sectionId) : null;
-
-    candidates.push({
-      name: String(name),
-      score: score + (source === "showing" ? 40 : 0),
-      ticketTypeId,
-      sectionId,
-      source,
-      raw: d,
-    });
+  // Step 1: Match ticketTypes by name fuzzy
+  const matchedTickets = [];
+  for (const tt of ticketTypes) {
+    const ttId = (tt?.id != null && String(tt.id).match(/^\d+$/)) ? parseInt(tt.id) : null;
+    if (!ttId) continue;
+    // Thử name + shortName + description
+    const nameCandidates = [tt.name, tt.shortName, tt.description].filter(Boolean);
+    let bestScore = 0;
+    let matchedName = "";
+    for (const n of nameCandidates) {
+      const s = zoneScoreTb(target, n);
+      if (s > bestScore) { bestScore = s; matchedName = n; }
+    }
+    if (bestScore > 0) {
+      matchedTickets.push({ tt, ttId, score: bestScore, matchedName });
+    }
   }
 
-  for (const d of walkObj(showJson)) consider(d, "showing");
-  for (const d of walkObj(seatmapJson)) consider(d, "seatmap");
+  // Step 2: For each matched ticket, find sections with matching ticketTypeId
+  for (const mt of matchedTickets) {
+    const matchingSections = sections.filter(s => {
+      const sttId = (s?.ticketTypeId != null && String(s.ticketTypeId).match(/^\d+$/))
+        ? parseInt(s.ticketTypeId) : null;
+      return sttId === mt.ttId;
+    });
 
-  // Merge sectionId từ candidate khác cùng tên
-  for (const c of candidates) {
-    if (c.sectionId == null) {
-      for (const other of candidates) {
-        if (other === c || other.sectionId == null) continue;
-        if (zoneScoreTb(c.name, other.name) > 0 || zoneScoreTb(other.name, c.name) > 0) {
-          c.sectionId = other.sectionId;
-          break;
-        }
-      }
+    if (matchingSections.length === 0) {
+      // Không tìm thấy section nào — push candidate không có sectionId
+      // (Konva fallback sẽ fail, nhưng giữ candidate cho debug)
+      candidates.push({
+        name: mt.matchedName || mt.tt.name || "",
+        score: mt.score + 40,  // ticket boost
+        ticketTypeId: mt.ttId,
+        sectionId: null,
+        source: "ticket_only_no_section",
+        raw: { ticketType: mt.tt },
+      });
+      continue;
+    }
+
+    // Mỗi section là 1 candidate (cho phép pick section nào sale-able)
+    for (const sec of matchingSections) {
+      const secId = (sec?.id != null && String(sec.id).match(/^\d+$/)) ? parseInt(sec.id) : null;
+      if (!secId) continue;
+      candidates.push({
+        name: sec.name || mt.matchedName || "",
+        score: mt.score + 40,  // ticket boost
+        ticketTypeId: mt.ttId,
+        sectionId: secId,
+        source: "ticket+section",
+        raw: { ticketType: mt.tt, section: sec },
+      });
+    }
+  }
+
+  // Step 3: Fallback — section name match (cho event không có ticketType match)
+  if (!candidates.length) {
+    for (const sec of sections) {
+      const name = sec.name || sec.shortName || "";
+      if (!name) continue;
+      const score = zoneScoreTb(target, name);
+      if (score <= 0) continue;
+      const secId = (sec?.id != null && String(sec.id).match(/^\d+$/)) ? parseInt(sec.id) : null;
+      const ttId  = (sec?.ticketTypeId != null && String(sec.ticketTypeId).match(/^\d+$/))
+        ? parseInt(sec.ticketTypeId) : null;
+      if (!secId) continue;
+      candidates.push({
+        name,
+        score,
+        ticketTypeId: ttId,
+        sectionId: secId,
+        source: "section_only",
+        raw: { section: sec, ticketType: ticketTypes.find(t => t.id === ttId) || {} },
+      });
     }
   }
 
@@ -177,10 +223,20 @@ function collectApiZones(showJson, seatmapJson, target) {
 
 function apiZoneTicketStatus(apiZone) {
   const raw = (apiZone || {}).raw || {};
+  // Schema mới (post-fix 2026-05-24): raw = {ticketType, section}
+  // Schema cũ fallback: raw có thể là object phẳng
   const ticketType = raw.ticketType || raw.ticket_type || {};
-  const status = raw.status;
-  const ticketStatus = normTb(ticketType.status || raw.ticketStatus || raw.ticket_status || raw.statusCode || "");
-  const statusName = normTb(ticketType.statusName || ticketType.status_name || raw.statusName || raw.status_name || "");
+  const section    = raw.section || {};
+  // Status có thể ở ticketType, section, hoặc raw level (legacy)
+  const status = section.status ?? ticketType.status ?? raw.status;
+  const ticketStatus = normTb(
+    ticketType.status || section.status || raw.ticketStatus ||
+    raw.ticket_status || raw.statusCode || ""
+  );
+  const statusName = normTb(
+    ticketType.statusName || ticketType.status_name ||
+    section.statusName  || raw.statusName || raw.status_name || ""
+  );
 
   let soldOut = false, salable = false;
   if (["sold out", "soldout", "het ve"].includes(ticketStatus)) soldOut = true;
@@ -372,6 +428,7 @@ async function clickZoneKonvaTb(target, apiZone) {
   const offsets = [[0,0],[3,0],[-3,0],[0,3],[0,-3],[8,0],[-8,0],[0,8],[0,-8]];
 
   for (const p of points.slice(0, 10)) {
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort Konva click", "yellow"); return false; }
     if (isTbZoneModalOpen()) {
       svpLog(`✅ Popup mở trước khi thử point tiếp: ${target}`, "green");
       return true;
@@ -381,8 +438,10 @@ async function clickZoneKonvaTb(target, apiZone) {
     svpLog(`🎯 Thử click: mode=${p.mode} point=(${bx.toFixed(1)},${by.toFixed(1)}) hit=${hit}`, "blue");
 
     for (const [dx, dy] of offsets) {
+      if (svpShouldStop()) { svpLog("🛑 Stop signal — abort Konva click offset", "yellow"); return false; }
       await realClick(bx + dx, by + dy);
       for (let i = 0; i < 8; i++) {
+        if (svpShouldStop()) return false;
         await sleep(120);
         if (isTbZoneModalOpen()) {
           svpLog(`✅ Popup mở: ${target} | point=(${(bx+dx).toFixed(1)},${(by+dy).toFixed(1)})`, "green");
@@ -436,11 +495,13 @@ function getTbModalInfo() {
 async function setTbModalQuantity(targetQty) {
   // Chờ modal visible
   for (let i = 0; i < 30; i++) {
+    if (svpShouldStop()) return false;
     if (getTbModalInfo().visible) break;
     await sleep(100);
   }
 
   for (let attempt = 0; attempt < 20; attempt++) {
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort setQuantity", "yellow"); return false; }
     const info = getTbModalInfo();
     if (!info.visible) return false;
 
@@ -473,6 +534,7 @@ async function setTbModalQuantity(targetQty) {
 
 async function clickTbModalContinue() {
   for (let i = 0; i < 20; i++) {
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort clickContinue", "yellow"); return false; }
     const info = getTbModalInfo();
     if (info.cont && !info.cont.disabled) {
       info.cont.el.click();
@@ -500,6 +562,17 @@ async function runTicketboxSeatZone(cfg) {
   if (!info.eventId || !info.showingId) {
     svpLog("❌ Không tìm được eventId/showingId Ticketbox", "red");
     return false;
+  }
+
+  // ── STAGE 4 captcha gate ────────────────────────────────────────────────────
+  // Nếu captcha overlay đang hiển thị (case Hunt navigate vào event hot),
+  // pause bot, chờ user solve. Tránh click Konva trong khi captcha chặn UI.
+  if (window.__SVP_TB_CAPTCHA__) {
+    const captchaOk = await window.__SVP_TB_CAPTCHA__.waitForResolved(info.showingId, 90000);
+    if (!captchaOk) {
+      svpLog("❌ Captcha không được solve trong 90s — abort flow", "red");
+      return false;
+    }
   }
 
   const dates = await resolveDateCandidates(info.eventId, info.showingId, info.date);
@@ -532,6 +605,7 @@ async function runTicketboxSeatZone(cfg) {
 
         if (chosen) {
           apiZone = chosen;
+          apiZone._matchedDate = date;
           svpLog(`✅ API match: ${apiZone.name} | sectionId=${apiZone.sectionId} | ticketTypeId=${apiZone.ticketTypeId}`, "green");
           if (soldOut.length) svpLog(`⏭️ Bỏ qua zone hết vé: ${soldOut.map(x => x.name).join(", ")}`, "yellow");
           break;
@@ -554,7 +628,36 @@ async function runTicketboxSeatZone(cfg) {
       continue;
     }
 
-    // Click Konva zone
+    // ── STAGE 4 API-FIRST PATH ─────────────────────────────────────────────────
+    // Có đủ ticketTypeId + sectionId → thử reserve qua API trước Konva.
+    // Nếu fail (no captcha token, expired token, server reject) → fallback Konva.
+    if (apiZone && apiZone.ticketTypeId && apiZone.sectionId && window.__SVP_TB_RESERVE__) {
+      const apiResult = await _tryApiReserveZone(info, apiZone, quantity);
+      if (apiResult.success) {
+        svpLog(`🎫 API-first reserve OK — bookingCode=${apiResult.bookingCode}`, "green");
+        // Emit structured event cho desktop UI
+        if (window.svpEvent) {
+          window.svpEvent("reserve.success", {
+            platform: "ticketbox",
+            mode: "zone",
+            bookingCode: apiResult.bookingCode,
+            expireIn: apiResult.expireIn,
+            showingId: String(info.showingId),
+            eventId: String(info.eventId),
+            zoneName: apiZone.name,
+            quantity,
+            method: "api-first",
+            durationMs: apiResult.durationMs,
+            checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${info.showingId}/question-form?date=${apiZone._matchedDate}`,
+          });
+        }
+        await _navigateToCheckoutAfterApi(info, apiZone._matchedDate, apiResult.bookingCode);
+        return true;
+      }
+      svpLog(`⚠️ API-first fail (${apiResult.error?.reason || apiResult.error?.message}) — fallback Konva`, "yellow");
+    }
+
+    // Click Konva zone (fallback hoặc default nếu không đủ data)
     const clicked = await clickZoneKonvaTb(target, apiZone);
     if (!clicked) {
       lastErr = `không click được zone: ${target}`;
@@ -581,4 +684,36 @@ async function runTicketboxSeatZone(cfg) {
 
   svpLog(`❌ Không chọn được seat_zone. Lỗi cuối: ${lastErr}`, "red");
   return false;
+}
+
+// ── Stage 4 API-first helpers ────────────────────────────────────────────────
+
+async function _tryApiReserveZone(info, apiZone, quantity) {
+  const reserve = window.__SVP_TB_RESERVE__;
+  if (!reserve) {
+    return { success: false, error: { reason: "reserve_api_not_loaded" } };
+  }
+  const items = reserve.buildZoneItems(apiZone.ticketTypeId, quantity, apiZone.sectionId);
+  return await reserve.submitTicketInfo({
+    eventId: info.eventId,
+    showingId: info.showingId,
+    date: apiZone._matchedDate || info.date,
+    items,
+    timeoutMs: 1500,
+  });
+}
+
+async function _navigateToCheckoutAfterApi(info, date, bookingCode) {
+  // Lưu bookingCode vào localStorage theo schema Ticketbox dùng:
+  //   bookingCode_{showingId} = JSON.stringify(bookingCode)
+  try {
+    localStorage.setItem(`bookingCode_${info.showingId}`, JSON.stringify(bookingCode));
+  } catch (e) {
+    svpLog(`⚠️ Lưu bookingCode vào localStorage fail: ${e.message}`, "yellow");
+  }
+
+  // Navigate sang question-form (runner.js sẽ auto-fill)
+  const targetUrl = `https://ticketbox.vn/events/${info.eventId}/bookings/${info.showingId}/question-form?date=${date}`;
+  svpLog(`↪️ Navigate → question-form`, "blue");
+  location.href = targetUrl;
 }

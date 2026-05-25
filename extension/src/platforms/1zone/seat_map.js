@@ -101,27 +101,77 @@ function numAllowed(num, spec) {
 function parsePriority1Zone(raw) {
   raw = String(raw || "").trim();
   if (!raw) return { type: "empty", raw };
-  const compact = raw.toUpperCase().replace(/\s/g, "");
 
+  // Tách zone prefix "Zone X|rest" → zoneFilter = "Zone X", rest = "rest"
+  // Desktop UI build format:
+  //   "Zone 2"            → zone only
+  //   "M:8-18"            → row + seat range (no zone)
+  //   "Zone 2|M:8-18"     → all three
+  //   "Zone 2|M"          → zone + row (no seat range)
+  //   "M"                 → row only
+  let zoneFilter = null;
+  let rest = raw;
+  if (raw.includes("|")) {
+    const idx = raw.indexOf("|");
+    zoneFilter = raw.slice(0, idx).trim();
+    rest = raw.slice(idx + 1).trim();
+  }
+
+  const compact = rest.toUpperCase().replace(/\s/g, "");
+
+  // Type "range" — có ":" hoặc có cả row + seat spec
   if (compact.includes(":")) {
     const [left, right] = compact.split(":", 2);
     const rows = parseRowRange(left);
     const numSpec = parseNumSpec(right);
     if (rows.length && (numSpec.ranges.length || numSpec.values.size))
-      return { type: "range", raw, rows, numSpec };
+      return { type: "range", raw, rows, numSpec, zoneFilter };
   }
 
-  const exact = [];
-  let okExact = true;
-  for (const token of compact.split(",")) {
-    if (!token) continue;
-    const m = token.match(/^([A-Z]+)-?(\d+)$/);
-    if (!m) { okExact = false; break; }
-    exact.push({ row: m[1], num: parseInt(m[2]), label: `${m[1]}-${parseInt(m[2])}` });
+  // Type "exact" — seat label như "M-19", "M19", "AA12"
+  // Giới hạn row 1-2 chars để KHÔNG match zone name dài ("ZONE2", "VIP1"...)
+  // Chỉ thử exact nếu KHÔNG có zoneFilter (zone-only case fall through sang text/range)
+  if (!zoneFilter) {
+    const exact = [];
+    let okExact = true;
+    for (const token of compact.split(",")) {
+      if (!token) continue;
+      const m = token.match(/^([A-Z]{1,2})-?(\d+)$/);
+      if (!m) { okExact = false; break; }
+      exact.push({ row: m[1], num: parseInt(m[2]), label: `${m[1]}-${parseInt(m[2])}` });
+    }
+    if (exact.length && okExact) return { type: "exact", raw, seats: exact };
   }
-  if (exact.length && okExact) return { type: "exact", raw, seats: exact };
 
-  return { type: "text", raw, norm: normStr(raw) };
+  // Type "range" — nếu rest chỉ là row name "M" (không ":") + zoneFilter có
+  // → coi như "any seat in row M of zone X"
+  if (zoneFilter && rest) {
+    const rows = parseRowRange(compact);
+    if (rows.length) {
+      return { type: "range", raw, rows, numSpec: null, zoneFilter };
+    }
+  }
+  // Type "range" — rest chỉ là row name (không zone, không seat) như "M"
+  if (!zoneFilter && rest && /^[A-Z]{1,2}$/.test(compact)) {
+    return { type: "range", raw, rows: [compact], numSpec: null, zoneFilter: null };
+  }
+
+  // Type "text" — fallback. norm dùng zoneFilter nếu có (zone-only case)
+  // hoặc rest (text describe zone/ghế tự do)
+  return { type: "text", raw, norm: normStr(zoneFilter || rest), zoneFilter };
+}
+
+// Helper: filter tickets theo zone name fuzzy
+function _filterByZone(tickets, zoneFilter) {
+  if (!zoneFilter) return tickets;
+  const zNorm = normStr(zoneFilter);
+  if (!zNorm) return tickets;
+  return tickets.filter(t => {
+    const tZone = normStr(t.zoneName || "");
+    const tClass = normStr(t.ticketClassName || "");
+    return tZone === zNorm || tZone.includes(zNorm) || zNorm.includes(tZone) ||
+           tClass === zNorm || tClass.includes(zNorm);
+  });
 }
 
 // ── Adjacent picker ───────────────────────────────────────────────────────────
@@ -168,10 +218,14 @@ function selectTickets(tickets, priorities, quantity, requireAdjacent = true, al
     const parsed = parsePriority1Zone(raw);
     if (parsed.type === "empty") continue;
 
+    // Pre-filter theo zone nếu có zoneFilter (áp dụng cho mọi type)
+    const zoneScoped = _filterByZone(tickets, parsed.zoneFilter);
+    if (parsed.zoneFilter && !zoneScoped.length) continue;
+
     if (parsed.type === "exact") {
       const selected = [];
       for (const want of parsed.seats) {
-        const found = tickets.find(t => t.rowName === want.row && t.codeNum === want.num);
+        const found = zoneScoped.find(t => t.rowName === want.row && t.codeNum === want.num);
         if (!found) break;
         selected.push(found);
       }
@@ -181,8 +235,9 @@ function selectTickets(tickets, priorities, quantity, requireAdjacent = true, al
 
     if (parsed.type === "range") {
       const allowedRows = new Set(parsed.rows);
-      const candidates = tickets.filter(t =>
-        allowedRows.has(t.rowName) && numAllowed(t.codeNum, parsed.numSpec)
+      const candidates = zoneScoped.filter(t =>
+        allowedRows.has(t.rowName) &&
+        (parsed.numSpec ? numAllowed(t.codeNum, parsed.numSpec) : true)
       );
       if (candidates.length < quantity) continue;
 
@@ -200,13 +255,22 @@ function selectTickets(tickets, priorities, quantity, requireAdjacent = true, al
       continue;
     }
 
-    // Text match
+    // Text match — dùng zoneScoped (đã filter) hoặc filter thêm theo norm
     const norm = parsed.norm;
-    const candidates = tickets.filter(t => {
-      const hay = [t.zoneName, t.ticketClassName, t.label, t.objectId]
-        .map(normStr).join(" ");
-      return hay.includes(norm) || norm.includes(hay.split(" ")[0]);
-    }).sort((a,b) => a.codeNum - b.codeNum);
+    let candidates;
+    if (parsed.zoneFilter) {
+      // Zone-only case: lấy bất kỳ ghế nào trong zone, ưu tiên codeNum nhỏ
+      candidates = [...zoneScoped].sort((a,b) =>
+        a.rowName.localeCompare(b.rowName) || a.codeNum - b.codeNum
+      );
+    } else {
+      // Text describe tự do: match trong toàn bộ tickets
+      candidates = tickets.filter(t => {
+        const hay = [t.zoneName, t.ticketClassName, t.label, t.objectId]
+          .map(normStr).join(" ");
+        return hay.includes(norm) || norm.includes(hay.split(" ")[0]);
+      }).sort((a,b) => a.codeNum - b.codeNum);
+    }
 
     if (candidates.length < quantity) continue;
     if (requireAdjacent) {
@@ -357,6 +421,7 @@ async function run1ZoneSeatMap(cfg) {
   const maxAttempts = Math.min(30, Math.max(1, tickets.length));
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat selection loop", "yellow"); return false; }
     const { selected, reason } = selectTickets(remaining, priorities, quantity, requireAdjacent, allowSplit);
 
     if (selected.length < quantity) {
@@ -387,13 +452,72 @@ async function run1ZoneSeatMap(cfg) {
       svpLog(`✅ Seats.io đã chọn ${seatsRes.selectedCount}/${quantity} ghế`, "green");
       await sleep(800);
 
+      // Stage 3: setup hook capture orderId TRƯỚC khi click Thanh toán
+      const capture = window.__SVP_1Z_CAPTURE__;
+      let orderIdResult = null;
+      if (capture) {
+        capture.clearReserveCache();
+        capture.waitForOrderId(12000).then(r => { orderIdResult = r; });
+      } else {
+        svpLog("⚠️ __SVP_1Z_CAPTURE__ chưa load — fallback chỉ click + wait", "yellow");
+      }
+
       // Click Thanh toán
       svpLog("🖱️ Click Thanh toán", "blue");
       const clicked = await click1ZonePaymentBtn();
-      if (!clicked) svpLog("⚠️ Không tìm thấy nút Thanh toán", "yellow");
-      await sleep(1000);
-      svpLog("✅ Đã click Thanh toán — chờ checkout...", "green");
-      return true;
+      if (!clicked) {
+        svpLog("⚠️ Không tìm thấy nút Thanh toán", "yellow");
+        return true;
+      }
+
+      // Chờ hook orderId hoặc URL navigate
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        if (svpShouldStop()) { svpLog("🛑 Stop signal — abort wait orderId", "yellow"); return false; }
+        await sleep(150);
+
+        // Priority 1: hook capture
+        if (orderIdResult) {
+          if (orderIdResult.success && orderIdResult.orderId) {
+            svpLog(`✅ Reserve OK — orderId=${orderIdResult.orderId}`, "green");
+            // Đợi nav xảy ra
+            const navDeadline = Date.now() + 5000;
+            while (Date.now() < navDeadline) {
+              const u = location.href;
+              if (u.includes("/checkout") || u.includes("/order/")) {
+                svpLog(`✅ Navigate checkout xong`, "green");
+                return true;
+              }
+              await sleep(200);
+            }
+            svpLog(`✅ Có orderId nhưng URL chưa navigate — coi như success`, "green");
+            return true;
+          } else if (orderIdResult.error) {
+            const ec = orderIdResult.error.errorCode;
+            const msg = orderIdResult.error.message || "";
+            svpLog(`❌ Reserve FAIL — errorCode=${ec} msg=${msg}`, "red");
+            return false;
+          }
+        }
+
+        // Priority 2: URL change fallback
+        const u = location.href;
+        if (u.includes("/checkout") || u.includes("/order/")) {
+          if (orderIdResult?.orderId) {
+            svpLog(`✅ Navigate checkout (orderId=${orderIdResult.orderId})`, "green");
+          } else {
+            svpLog(`✅ Navigate checkout (URL detect, hook chưa thấy orderId)`, "yellow");
+          }
+          return true;
+        }
+      }
+
+      if (orderIdResult?.success) {
+        svpLog(`⏰ Timeout chờ navigate nhưng có orderId=${orderIdResult.orderId} — success`, "yellow");
+        return true;
+      }
+      svpLog("⚠️ Timeout — không capture được orderId, không navigate.", "yellow");
+      return false;
     }
 
     // Seats.io fail → bỏ ghế này, thử tiếp

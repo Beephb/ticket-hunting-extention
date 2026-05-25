@@ -1,28 +1,43 @@
 // src/content/utils.js
-// Utilities dùng chung cho tất cả content scripts
+// Utilities dùng chung cho tất cả content scripts.
+// NOTE: svpLog + LOG_COLORS đã chuyển sang src/shared/logger.js
+// File này giữ lại sleep, normText, waitForElement, detectPlatform, realClick...
 
 const SVP_VERSION = "2.0.0";
-
-// ── Logger ────────────────────────────────────────────────────────────────────
-
-const LOG_COLORS = {
-  green: "#22c55e", red: "#ef4444", yellow: "#facc15",
-  blue: "#38bdf8", white: "#e2e8f0", gray: "#94a3b8",
-};
-
-function svpLog(msg, color = "white") {
-  const clr = LOG_COLORS[color] || LOG_COLORS.white;
-  console.log(`%c[SVP] ${msg}`, `color:${clr}; font-weight:bold`);
-  // Gửi log về background để relay về App
-  try {
-    chrome.runtime.sendMessage({ type: "LOG", msg, color });
-  } catch { /* extension context invalidated */ }
-}
 
 // ── Sleep ────────────────────────────────────────────────────────────────────
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+// ── Cooperative cancellation (STOP_HUNT signal) ──────────────────────────────
+// runner.js set window.__SVP_STOP_REQUESTED__ = true khi user bấm Dừng Hunt.
+// Tất cả loop dài trong seat_*.js, hunt_*.js phải check qua svpShouldStop() để
+// có thể abort sớm thay vì chạy đến hết timeout.
+window.__SVP_STOP_REQUESTED__ = false;
+
+function svpShouldStop() {
+  return !!window.__SVP_STOP_REQUESTED__;
+}
+
+function svpResetStop() {
+  window.__SVP_STOP_REQUESTED__ = false;
+}
+
+function svpRequestStop() {
+  window.__SVP_STOP_REQUESTED__ = true;
+}
+
+// Sleep có check stop. Trả false nếu bị stop, true nếu sleep đủ thời gian.
+async function svpSleep(ms) {
+  const start = Date.now();
+  const chunk = Math.min(ms, 100);
+  while (Date.now() - start < ms) {
+    if (svpShouldStop()) return false;
+    await sleep(Math.min(chunk, ms - (Date.now() - start)));
+  }
+  return !svpShouldStop();
 }
 
 // ── Normalize text (bỏ dấu) ──────────────────────────────────────────────────

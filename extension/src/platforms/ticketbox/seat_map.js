@@ -413,6 +413,7 @@ function isContinueEnabled() {
 }
 
 async function clickSeatOnCanvas(seat, allSectionSeats) {
+  if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat click", "yellow"); return false; }
   const label = seat.label || `${seat.rowName}-${seat.seatNum}`;
   const points = [];
 
@@ -444,8 +445,10 @@ async function clickSeatOnCanvas(seat, allSectionSeats) {
   const offsets = [[0,0],[2,0],[-2,0],[0,2],[0,-2],[4,0],[-4,0],[0,4],[0,-4],[6,0],[-6,0],[0,6],[0,-6]];
 
   for (const p of points) {
+    if (svpShouldStop()) return false;
     svpLog(`🎯 Thử click ${label}: mode=${p.mode} point=(${p.x.toFixed(1)},${p.y.toFixed(1)}) hit=${elemAt(p.x, p.y)}`, "blue");
     for (const [dx, dy] of offsets) {
+      if (svpShouldStop()) return false;
       await realClick(p.x + dx, p.y + dy);
       await sleep(250);
       if (isContinueEnabled()) {
@@ -517,6 +520,15 @@ async function runTicketboxSeatMap(cfg) {
     return false;
   }
 
+  // ── STAGE 4 captcha gate ────────────────────────────────────────────────────
+  if (window.__SVP_TB_CAPTCHA__) {
+    const captchaOk = await window.__SVP_TB_CAPTCHA__.waitForResolved(info.showingId, 90000);
+    if (!captchaOk) {
+      svpLog("❌ Captcha không được solve trong 90s — abort flow", "red");
+      return false;
+    }
+  }
+
   const candidates = await resolveShowingCandidates(info.eventId, info.showingId, info.date);
   if (!candidates.length) candidates.push({ id: info.showingId, date: info.date || new Date().toISOString().slice(0,10), _source: "url-only" });
 
@@ -525,6 +537,7 @@ async function runTicketboxSeatMap(cfg) {
   let lastErr = "";
 
   for (let cidx = 0; cidx < candidates.length; cidx++) {
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort showing loop", "yellow"); return false; }
     const cand = candidates[cidx];
     const showingId = cand.id;
     const date = cand.date || new Date().toISOString().slice(0, 10);
@@ -577,7 +590,56 @@ async function runTicketboxSeatMap(cfg) {
         const labels = selected.map(s => s.label);
         svpLog(`✅ Chọn được ${selected.length} ghế: ${labels.join(", ")} | section=${secName} | ticket=${ttName}`, "green");
 
-        // Navigate đúng showing nếu cần
+        // ── STAGE 4 API-FIRST PATH ─────────────────────────────────────────────
+        // Có đủ ticketTypeId + sectionId + seat IDs → thử reserve qua API
+        const ticketTypeId = sec.ticketTypeId || tt.id;
+        if (ticketTypeId && secId && window.__SVP_TB_RESERVE__) {
+          const reserve = window.__SVP_TB_RESERVE__;
+          const items = reserve.buildMapItems(
+            ticketTypeId,
+            quantity,
+            secId,
+            selected.map(s => ({ id: s.id, quantity: 1 }))
+          );
+          const apiResult = await reserve.submitTicketInfo({
+            eventId: info.eventId,
+            showingId,
+            date,
+            items,
+            timeoutMs: 2000,
+          });
+          if (apiResult.success) {
+            svpLog(`🎫 API-first reserve OK — bookingCode=${apiResult.bookingCode}`, "green");
+            // Emit structured event cho desktop UI
+            if (window.svpEvent) {
+              window.svpEvent("reserve.success", {
+                platform: "ticketbox",
+                mode: "map",
+                bookingCode: apiResult.bookingCode,
+                expireIn: apiResult.expireIn,
+                showingId: String(showingId),
+                eventId: String(info.eventId),
+                sectionName: secName,
+                ticketName: ttName,
+                seats: selected.map(s => s.label),
+                quantity,
+                method: "api-first",
+                durationMs: apiResult.durationMs,
+                checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`,
+              });
+            }
+            try {
+              localStorage.setItem(`bookingCode_${showingId}`, JSON.stringify(apiResult.bookingCode));
+            } catch (e) {
+              svpLog(`⚠️ Lưu bookingCode fail: ${e.message}`, "yellow");
+            }
+            location.href = `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`;
+            return true;
+          }
+          svpLog(`⚠️ API-first fail (${apiResult.error?.reason || apiResult.error?.message}) — fallback Konva click`, "yellow");
+        }
+
+        // Navigate đúng showing nếu cần (fallback path)
         const curUrl = location.href;
         if (!curUrl.includes(`/bookings/${showingId}/`)) {
           svpLog(`↪️ Chuyển UI sang showing: ${showingId}`, "blue");
