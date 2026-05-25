@@ -84,16 +84,37 @@ function numRankTbMap(num, order) {
 }
 
 function parsePriorityTbMap(target) {
-  const raw = String(target || "").trim();
-  const compact = raw.toUpperCase().replace(/\s/g, "");
+  let raw = String(target || "").trim();
   if (!raw) return { type: "empty", raw };
+
+  // Tách parity suffix (:odd / :even cuối)
+  let parity = null;
+  const lowerRaw = raw.toLowerCase();
+  if (lowerRaw.endsWith(":odd")) {
+    parity = "odd";
+    raw = raw.slice(0, -4);
+  } else if (lowerRaw.endsWith(":even")) {
+    parity = "even";
+    raw = raw.slice(0, -5);
+  }
+  raw = raw.trim();
+
+  const compact = raw.toUpperCase().replace(/\s/g, "");
 
   if (compact.includes(":")) {
     const [left, right] = compact.split(":", 2);
     const rows = parseRowRangeTbMap(left);
-    const numSpec = parseNumSpecTbMap(right);
-    if (rows.length && (numSpec.ranges.length || numSpec.values.size))
-      return { type: "range", raw, rows, numSpec };
+    // Hỗ trợ wildcard "*" cho seat range
+    let numSpec;
+    if (right === "*" || right === "") {
+      numSpec = null;
+    } else {
+      numSpec = parseNumSpecTbMap(right);
+      if (!numSpec.ranges.length && !numSpec.values.size) numSpec = null;
+    }
+    if (rows.length) {
+      return { type: "range", raw, rows, numSpec, parity };
+    }
   }
 
   const exact = [];
@@ -104,9 +125,17 @@ function parsePriorityTbMap(target) {
     if (!m) { okExact = false; break; }
     exact.push({ row: m[1], num: parseInt(m[2]), label: `${m[1]}-${parseInt(m[2])}` });
   }
-  if (exact.length && okExact) return { type: "exact", raw, seats: exact };
+  if (exact.length && okExact) return { type: "exact", raw, seats: exact, parity };
 
-  return { type: "text", raw, norm: normTbMap(raw) };
+  return { type: "text", raw, norm: normTbMap(raw), parity };
+}
+
+// Helper: filter seatNum theo parity (odd/even/null)
+function _matchParityTb(seatNum, parity) {
+  if (!parity) return true;
+  if (parity === "odd")  return seatNum % 2 === 1;
+  if (parity === "even") return seatNum % 2 === 0;
+  return true;
 }
 
 // ── Extract available seats from section detail ───────────────────────────────
@@ -211,9 +240,10 @@ function applyNumberMode(seats, mode) {
   return seats;
 }
 
-function tryPickFromSection(sectionDetail, parsed, quantity, requireAdjacent, allowSplit, seatNumberMode) {
+function tryPickFromSection(sectionDetail, parsed, quantity, requireAdjacent, allowSplit, seatNumberMode, allowPartial = false) {
   const seats = flattenAvailable(sectionDetail);
   if (!seats.length) return [];
+  const minRequired = allowPartial ? 1 : quantity;
 
   if (parsed.type === "exact") {
     const selected = [];
@@ -222,7 +252,7 @@ function tryPickFromSection(sectionDetail, parsed, quantity, requireAdjacent, al
       if (!found) return [];
       selected.push(found);
     }
-    return selected.length >= quantity ? selected : [];
+    return selected.length >= minRequired ? selected.slice(0, quantity) : [];
   }
 
   if (parsed.type === "range") {
@@ -230,15 +260,27 @@ function tryPickFromSection(sectionDetail, parsed, quantity, requireAdjacent, al
     const numSpec = parsed.numSpec || {};
     const numOrder = numSpec.order || [];
     const allowedRows = new Set(rowOrder);
-    let filtered = seats.filter(s => allowedRows.has(s.rowName) && numAllowedTbMap(s.seatNum, numSpec));
+    let filtered = seats.filter(s =>
+      allowedRows.has(s.rowName) &&
+      (parsed.numSpec ? numAllowedTbMap(s.seatNum, numSpec) : true) &&
+      _matchParityTb(s.seatNum, parsed.parity)  // NEW: parity filter
+    );
     filtered = applyNumberMode(filtered, seatNumberMode);
-    if (filtered.length < quantity) return [];
-    return pickFromRowsInOrder(filtered, rowOrder, numOrder, quantity, requireAdjacent, allowSplit);
+    if (filtered.length < minRequired) return [];
+    const picked = pickFromRowsInOrder(filtered, rowOrder, numOrder, quantity, requireAdjacent, allowSplit || allowPartial);
+    if (picked.length >= minRequired) return picked.slice(0, quantity);
+    // Allow partial: trả về whatever found
+    if (allowPartial && filtered.length > 0) return filtered.slice(0, Math.min(filtered.length, quantity));
+    return [];
   }
 
   // Text match
   let filtered = applyNumberMode(seats, seatNumberMode);
-  if (filtered.length < quantity) return [];
+  // Apply parity nếu có (text type cũng support)
+  if (parsed.parity) {
+    filtered = filtered.filter(s => _matchParityTb(s.seatNum, parsed.parity));
+  }
+  if (filtered.length < minRequired) return [];
   if (requireAdjacent) {
     const byRow = {};
     for (const s of filtered) (byRow[s.rowName] = byRow[s.rowName] || []).push(s);
@@ -246,9 +288,10 @@ function tryPickFromSection(sectionDetail, parsed, quantity, requireAdjacent, al
       const group = findAdjacentInSingleRow(rowSeats, quantity, []);
       if (group.length) return group;
     }
-    if (!allowSplit) return [];
+    if (!allowSplit && !allowPartial) return [];
   }
-  return filtered.sort((a,b) => a.rowName.localeCompare(b.rowName) || a.position - b.position).slice(0, quantity);
+  const sorted = filtered.sort((a,b) => a.rowName.localeCompare(b.rowName) || a.position - b.position);
+  return sorted.slice(0, Math.min(sorted.length, quantity));
 }
 
 // ── Resolve showing candidates ────────────────────────────────────────────────
@@ -508,9 +551,10 @@ async function runTicketboxSeatMap(cfg) {
   const quantity = parseInt(aseat.quantity) || 1;
   const requireAdjacent = aseat.require_adjacent !== false;
   const allowSplit = !!aseat.allow_split_seats;
+  const allowPartial = !!aseat.allow_partial;  // NEW
   const seatNumberMode = String(aseat.seat_number_mode || "auto").toLowerCase();
 
-  svpLog(`🪑 Ticketbox seat_map | SL=${quantity} | dãy=${seatNumberMode}`, "yellow");
+  svpLog(`🪑 Ticketbox seat_map | SL=${quantity} | dãy=${seatNumberMode}${allowPartial ? " | cho phép mua thiếu" : ""}`, "yellow");
 
   const info = extractTicketboxInfo();
   if (!info.eventId || !info.showingId) {
@@ -586,20 +630,24 @@ async function runTicketboxSeatMap(cfg) {
         if (!secRes.ok) { svpLog(`⚠️ GET section ${secName}/${secId} fail HTTP=${secRes.status}`, "yellow"); continue; }
         const sectionDetail = { ...(getResult(secRes.data) || {}), ...sec };
 
-        const selected = tryPickFromSection(sectionDetail, parsed, quantity, requireAdjacent, allowSplit, seatNumberMode);
+        const selected = tryPickFromSection(sectionDetail, parsed, quantity, requireAdjacent, allowSplit, seatNumberMode, allowPartial);
         if (!selected.length) continue;
 
         const labels = selected.map(s => s.label);
-        svpLog(`✅ Chọn được ${selected.length} ghế: ${labels.join(", ")} | section=${secName} | ticket=${ttName}`, "green");
+        const partialNote = selected.length < quantity ? ` (mua thiếu ${selected.length}/${quantity})` : "";
+        svpLog(`✅ Chọn được ${selected.length} ghế${partialNote}: ${labels.join(", ")} | section=${secName} | ticket=${ttName}`, "green");
 
         // ── STAGE 4 API-FIRST PATH ─────────────────────────────────────────────
         // Có đủ ticketTypeId + sectionId + seat IDs → thử reserve qua API
         const ticketTypeId = sec.ticketTypeId || tt.id;
         if (ticketTypeId && secId && window.__SVP_TB_RESERVE__) {
           const reserve = window.__SVP_TB_RESERVE__;
+          // Khi partial (selected.length < quantity), dùng selected.length
+          // để payload nhất quán (API Ticketbox reject nếu quantity != số seat IDs)
+          const actualQty = selected.length;
           const items = reserve.buildMapItems(
             ticketTypeId,
-            quantity,
+            actualQty,
             secId,
             selected.map(s => ({ id: s.id, quantity: 1 }))
           );
@@ -611,7 +659,8 @@ async function runTicketboxSeatMap(cfg) {
             timeoutMs: 2000,
           });
           if (apiResult.success) {
-            svpLog(`🎫 API-first reserve OK — bookingCode=${apiResult.bookingCode}`, "green");
+            const partialNote = actualQty < quantity ? ` (mua thiếu ${actualQty}/${quantity})` : "";
+            svpLog(`🎫 API-first reserve OK${partialNote} — bookingCode=${apiResult.bookingCode}`, "green");
             // Emit structured event cho desktop UI
             if (window.svpEvent) {
               window.svpEvent("reserve.success", {
@@ -624,7 +673,8 @@ async function runTicketboxSeatMap(cfg) {
                 sectionName: secName,
                 ticketName: ttName,
                 seats: selected.map(s => s.label),
-                quantity,
+                quantity: actualQty,
+                quantityTarget: quantity,
                 method: "api-first",
                 durationMs: apiResult.durationMs,
                 checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`,
@@ -650,14 +700,30 @@ async function runTicketboxSeatMap(cfg) {
         }
 
         // Click từng ghế
-        let allClicked = true;
+        // FIX: allow_partial-aware — không early-exit khi 1 ghế fail,
+        // tiếp tục thử các ghế còn lại; chỉ fail-section khi không có ghế nào click được
+        let clickedCount = 0;
+        const failedSeats = [];
         for (const seat of selected) {
           const ok = await clickSeatOnCanvas(seat, flattenAvailable(sectionDetail));
-          if (!ok) { allClicked = false; lastErr = "không click được ghế trên UI"; break; }
+          if (ok) {
+            clickedCount++;
+          } else {
+            failedSeats.push(seat.label);
+            if (!allowPartial) {
+              lastErr = "không click được ghế trên UI";
+              break;
+            }
+          }
         }
-        if (!allClicked) {
+        const minClick = allowPartial ? 1 : selected.length;
+        if (clickedCount < minClick) {
+          lastErr = lastErr || `chỉ click được ${clickedCount}/${selected.length} ghế (cần ≥${minClick})`;
           svpLog(`⚠️ ${lastErr}; thử option tiếp theo`, "yellow");
           continue;
+        }
+        if (failedSeats.length) {
+          svpLog(`ℹ️ Mua thiếu OK: click được ${clickedCount}/${selected.length} ghế. Fail: ${failedSeats.join(", ")}`, "yellow");
         }
 
         // Click Thanh toán

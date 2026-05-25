@@ -494,7 +494,7 @@ function getTbModalInfo() {
 
 // ── Set modal quantity ────────────────────────────────────────────────────────
 
-async function setTbModalQuantity(targetQty) {
+async function setTbModalQuantity(targetQty, allowPartial = false) {
   // Chờ modal visible
   for (let i = 0; i < 30; i++) {
     if (svpShouldStop()) return false;
@@ -517,18 +517,28 @@ async function setTbModalQuantity(targetQty) {
       return true;
     }
 
-    if (cur < targetQty && info.plus?.el) {
+    if (cur < targetQty && info.plus?.el && !info.plus.disabled) {
       info.plus.el.click();
-    } else if (cur > targetQty && info.minus?.el) {
+    } else if (cur > targetQty && info.minus?.el && !info.minus.disabled) {
       info.minus.el.click();
     } else {
+      // Nút + disabled (đã đạt max khu hết vé) hoặc nút - disabled
+      if (allowPartial && cur >= 1 && cur < targetQty) {
+        svpLog(`ℹ️ Khu chỉ còn ${cur}/${targetQty} vé — proceed do allow_partial=true`, "yellow");
+        return true;
+      }
       svpLog(`⚠️ Không click được +/-: cur=${cur} target=${targetQty}`, "yellow");
       break;
     }
     await sleep(120);
   }
 
-  svpLog(`⚠️ Set quantity chưa đạt: ${getTbModalInfo().qty} / cần ${targetQty}`, "yellow");
+  const finalQty = getTbModalInfo().qty;
+  if (allowPartial && finalQty >= 1 && finalQty < targetQty) {
+    svpLog(`ℹ️ Set quantity timeout, accept hiện=${finalQty}/${targetQty} do allow_partial=true`, "yellow");
+    return true;
+  }
+  svpLog(`⚠️ Set quantity chưa đạt: ${finalQty} / cần ${targetQty}`, "yellow");
   return false;
 }
 
@@ -555,8 +565,9 @@ async function runTicketboxSeatZone(cfg) {
   const aseat = cfg.auto_seat || {};
   const priorityList = aseat.zone_priority || aseat.priority_targets || [];
   const quantity = parseInt(aseat.quantity) || 1;
+  const allowPartial = !!aseat.allow_partial;  // NEW
 
-  svpLog(`🎟️ Ticketbox seat_zone | ưu tiên=${JSON.stringify(priorityList)} | SL=${quantity}`, "blue");
+  svpLog(`🎟️ Ticketbox seat_zone | ưu tiên=${JSON.stringify(priorityList)} | SL=${quantity}${allowPartial ? " (cho phép mua thiếu)" : ""}`, "blue");
 
   const info = extractTicketboxInfo();
   svpLog(`🔎 eventId=${info.eventId} | showingId=${info.showingId} | date=${info.date}`, "blue");
@@ -667,8 +678,8 @@ async function runTicketboxSeatZone(cfg) {
       continue;
     }
 
-    // Set quantity
-    if (!await setTbModalQuantity(quantity)) {
+    // Set quantity (truyền allowPartial — nếu zone hết vé, accept số lượng available)
+    if (!await setTbModalQuantity(quantity, allowPartial)) {
       svpLog("⚠️ Không set được số lượng. Popup đã mở đúng zone.", "yellow");
       return true; // popup mở đúng, để user tự xử
     }

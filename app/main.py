@@ -140,10 +140,11 @@ DEFAULT_CONFIG = {
         "platform": "1Zone",
         "seat_mode": "seat_zone",
         "zone_priority": [],
-        "seat_map_priorities": [],  # [{zone, row, seat_range}]
+        "seat_map_priorities": [],  # [{zone, row, seat_range, parity}]
         "quantity": 1,
         "require_adjacent": True,
         "allow_split_seats": False,
+        "allow_partial": False,  # NEW: nếu true, chấp nhận pick < quantity vẫn proceed
         "enabled": False,
     }
 }
@@ -386,10 +387,16 @@ LOG_COLORS = {
 # ── Seat Map Priority Row ─────────────────────────────────────────────────────
 
 class SeatMapRow(ctk.CTkFrame):
+    # Parity dropdown — hiển thị tiếng Việt, internal value là suffix cho config
+    PARITY_LABELS = ["Bất kỳ", "Lẻ", "Chẵn"]
+    _PARITY_TO_SUFFIX = {"Bất kỳ": "", "Lẻ": "odd", "Chẵn": "even"}
+    _SUFFIX_TO_PARITY = {"": "Bất kỳ", "odd": "Lẻ", "even": "Chẵn"}
+
     def __init__(self, parent, on_delete, **kwargs):
         super().__init__(parent, fg_color=C_PANEL2, corner_radius=8, **kwargs)
         self.on_delete = on_delete
-        self.grid_columnconfigure((0,1,2), weight=1)
+        # 4 columns: Khu | Hàng | Ghế số | Lẻ/Chẵn   + nút xóa
+        self.grid_columnconfigure((0,1,2,3), weight=1)
 
         # Khu
         ctk.CTkLabel(self, text="Khu", font=("Arial", 10), text_color=C_MUTED
@@ -412,11 +419,21 @@ class SeatMapRow(ctk.CTkFrame):
                                       font=("Arial", 11))
         self.inp_seat.grid(row=1, column=2, padx=2, pady=(0,6), sticky="ew")
 
-        # Nút xóa
+        # Parity (Lẻ / Chẵn / Bất kỳ) — giúp event VN có ghế split parity
+        ctk.CTkLabel(self, text="Lẻ/Chẵn", font=("Arial", 10), text_color=C_MUTED
+                     ).grid(row=0, column=3, padx=2, pady=(6,0), sticky="w")
+        self.sel_parity = ctk.CTkOptionMenu(
+            self, values=self.PARITY_LABELS,
+            height=30, font=("Arial", 11), width=140,
+        )
+        self.sel_parity.set("Bất kỳ")
+        self.sel_parity.grid(row=1, column=3, padx=2, pady=(0,6), sticky="ew")
+
+        # Nút xóa (column 4)
         ctk.CTkButton(self, text="✕", width=28, height=28, fg_color="#374151",
                       hover_color="#4b5563", font=("Arial", 11),
                       command=self._delete
-                      ).grid(row=0, column=3, rowspan=2, padx=(4,8), pady=4)
+                      ).grid(row=0, column=4, rowspan=2, padx=(4,8), pady=4)
 
     def _delete(self):
         self.destroy()
@@ -426,16 +443,25 @@ class SeatMapRow(ctk.CTkFrame):
         zone  = self.inp_zone.get().strip()
         row   = self.inp_row.get().strip().upper()
         seat  = self.inp_seat.get().strip()
+        parity_suffix = self._PARITY_TO_SUFFIX.get(self.sel_parity.get(), "")
+
         # Build priority string theo format seat_map
+        # Cú pháp mở rộng: <row>:<seat>[:odd|:even]
         if row and seat:
             s = f"{row}:{seat}"
+            if parity_suffix:
+                s = f"{s}:{parity_suffix}"
             if zone:
                 s = f"{zone}|{s}"
             return s
+        elif row and not seat:
+            # Chỉ row + parity → "K:*:odd"
+            if parity_suffix:
+                s = f"{row}:*:{parity_suffix}"
+                return f"{zone}|{s}" if zone else s
+            return f"{zone}|{row}" if zone else row
         elif zone and not row and not seat:
             return zone
-        elif row and not seat:
-            return row
         return ""
 
     def set_value(self, val):
@@ -445,10 +471,21 @@ class SeatMapRow(ctk.CTkFrame):
             zone_part, rest = val.split("|", 1)
             self.inp_zone.insert(0, zone_part)
             val = rest
+
+        # Detect parity suffix (:odd / :even cuối)
+        parity_suffix = ""
+        for suf in ("odd", "even"):
+            if val.endswith(f":{suf}"):
+                parity_suffix = suf
+                val = val[: -(len(suf) + 1)]  # strip ":odd" hoặc ":even"
+                break
+        self.sel_parity.set(self._SUFFIX_TO_PARITY.get(parity_suffix, "Bất kỳ"))
+
         if ":" in val:
             r, s = val.split(":", 1)
             self.inp_row.insert(0, r)
-            self.inp_seat.insert(0, s)
+            if s and s != "*":
+                self.inp_seat.insert(0, s)
         elif val:
             self.inp_zone.insert(0, val)
 
@@ -461,7 +498,7 @@ class App(ctk.CTk):
         _app_ref = self
 
         self.title("Săn Vé Pro v2.0")
-        self.geometry("960x660")
+        self.geometry("960x760")
         self.configure(fg_color=C_BG)
         self.resizable(True, True)
         self._cfg = load_config()
@@ -480,7 +517,7 @@ class App(ctk.CTk):
     # ── Build UI ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self.grid_columnconfigure(0, weight=0, minsize=380)
+        self.grid_columnconfigure(0, weight=0, minsize=450)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
@@ -830,13 +867,22 @@ class App(ctk.CTk):
         self.inp_qty = ctk.CTkEntry(f, placeholder_text="VD: 2", font=("Arial", 12))
         self.inp_qty.grid(row=7, column=0, padx=16, pady=(2,10), sticky="ew")
 
+        # Allow partial purchase — mua thiếu vẫn OK
+        self.var_allow_partial = ctk.BooleanVar(value=False)
+        self.chk_allow_partial = ctk.CTkCheckBox(
+            f, text="Mua thiếu vẫn OK (vé hết → mua được bấy nhiêu)",
+            variable=self.var_allow_partial,
+            font=("Arial", 11), text_color="#94a3b8",
+        )
+        self.chk_allow_partial.grid(row=8, column=0, padx=16, pady=(0,4), sticky="w")
+
         self.var_enabled = ctk.BooleanVar(value=False)
         self.chk_enabled = ctk.CTkCheckBox(
             f, text="Bật bot tự động", variable=self.var_enabled,
             font=("Arial", 12, "bold"), text_color=C_OK,
             command=self._on_toggle_bot
         )
-        self.chk_enabled.grid(row=8, column=0, padx=16, pady=(4,16), sticky="w")
+        self.chk_enabled.grid(row=9, column=0, padx=16, pady=(4,16), sticky="w")
 
     def _build_dynamic_zone(self):
         for w in self.dynamic_frame.winfo_children():
@@ -967,6 +1013,7 @@ class App(ctk.CTk):
                 self._add_seat_map_row()
 
         _set(self.inp_qty, str(as_.get("quantity", 1)))
+        self.var_allow_partial.set(bool(as_.get("allow_partial", False)))
         self.var_enabled.set(bool(as_.get("enabled", False)))
         self._update_status()
 
@@ -984,10 +1031,11 @@ class App(ctk.CTk):
         except Exception:
             qty = 1
 
-        cfg["auto_seat"]["platform"]  = self.sel_platform.get()
-        cfg["auto_seat"]["seat_mode"] = mode
-        cfg["auto_seat"]["quantity"]  = qty
-        cfg["auto_seat"]["enabled"]   = self.var_enabled.get()
+        cfg["auto_seat"]["platform"]      = self.sel_platform.get()
+        cfg["auto_seat"]["seat_mode"]     = mode
+        cfg["auto_seat"]["quantity"]      = qty
+        cfg["auto_seat"]["allow_partial"] = self.var_allow_partial.get()
+        cfg["auto_seat"]["enabled"]       = self.var_enabled.get()
 
         if mode == "seat_zone":
             zones = [z.strip() for z in self.txt_priority.get("1.0", "end").splitlines() if z.strip()]

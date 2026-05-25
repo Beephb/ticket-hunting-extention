@@ -344,7 +344,7 @@ function getUiInfo1Z() {
 
 // ── Set quantity ──────────────────────────────────────────────────────────────
 
-async function setQuantity1Z(quantity) {
+async function setQuantity1Z(quantity, allowPartial = false) {
   quantity = Math.max(1, quantity);
 
   // Chờ dialog visible + plus button
@@ -364,7 +364,15 @@ async function setQuantity1Z(quantity) {
     if (cur === quantity) { svpLog(`✅ Quantity đúng: ${cur}`, "green"); return true; }
 
     if (cur < quantity) {
-      if (!info.plus || info.plus.disabled) { svpLog(`⚠️ Không bấm được nút +. Hiện=${cur}, cần=${quantity}`, "yellow"); return false; }
+      if (!info.plus || info.plus.disabled) {
+        // Nút + bị disable → đã đạt max (zone hết vé)
+        if (allowPartial && cur >= 1) {
+          svpLog(`ℹ️ Zone chỉ còn ${cur}/${quantity} vé — proceed do allow_partial=true`, "yellow");
+          return true;
+        }
+        svpLog(`⚠️ Không bấm được nút +. Hiện=${cur}, cần=${quantity}`, "yellow");
+        return false;
+      }
       info.plus.el.click();
     } else {
       if (!info.minus || info.minus.disabled) { svpLog(`⚠️ Không bấm được nút -. Hiện=${cur}, cần=${quantity}`, "yellow"); return false; }
@@ -374,6 +382,11 @@ async function setQuantity1Z(quantity) {
   }
 
   const info = getUiInfo1Z();
+  // Sau 40 attempts không đạt — nếu allowPartial và cur >= 1, accept
+  if (allowPartial && info.qty >= 1) {
+    svpLog(`ℹ️ Set quantity timeout, accept hiện=${info.qty}/${quantity} do allow_partial=true`, "yellow");
+    return true;
+  }
   svpLog(`⚠️ Set quantity chưa đạt. Hiện=${info.qty}, cần=${quantity}`, "yellow");
   return false;
 }
@@ -497,13 +510,14 @@ async function run1ZoneSeatZone(cfg) {
   const aseat = cfg.auto_seat || {};
   const priorities = (aseat.zone_priority || aseat.priority_targets || []).map(p => String(p).trim()).filter(Boolean);
   const quantity = Math.max(1, parseInt(aseat.quantity) || 1);
+  const allowPartial = !!aseat.allow_partial;  // NEW: cho phép zone hết vé chỉ mua available
 
   if (!priorities.length) {
     svpLog("❌ Chưa nhập khu ưu tiên cho 1Zone seat_zone", "red");
     return false;
   }
 
-  svpLog(`🎟️ 1Zone seat_zone KONVA_NATIVE | ưu tiên=${JSON.stringify(priorities)} | SL=${quantity}`, "yellow");
+  svpLog(`🎟️ 1Zone seat_zone KONVA_NATIVE | ưu tiên=${JSON.stringify(priorities)} | SL=${quantity}${allowPartial ? " (cho phép mua thiếu)" : ""}`, "yellow");
 
   const info = extract1ZZoneInfo();
   svpLog(`🔎 eventId=${info.eventId} | calendarId=${info.calendarId}`, "blue");
@@ -552,8 +566,8 @@ async function run1ZoneSeatZone(cfg) {
       continue;
     }
 
-    // Set quantity
-    if (!await setQuantity1Z(quantity)) {
+    // Set quantity (truyền allowPartial — nếu zone hết vé, accept số lượng available)
+    if (!await setQuantity1Z(quantity, allowPartial)) {
       svpLog("⚠️ Đã mở đúng zone nhưng không set được số lượng. Dừng để tránh chọn sai.", "yellow");
       return true;
     }

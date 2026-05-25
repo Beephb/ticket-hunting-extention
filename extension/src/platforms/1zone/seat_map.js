@@ -104,11 +104,14 @@ function parsePriority1Zone(raw) {
 
   // Tách zone prefix "Zone X|rest" → zoneFilter = "Zone X", rest = "rest"
   // Desktop UI build format:
-  //   "Zone 2"            → zone only
-  //   "M:8-18"            → row + seat range (no zone)
-  //   "Zone 2|M:8-18"     → all three
-  //   "Zone 2|M"          → zone + row (no seat range)
-  //   "M"                 → row only
+  //   "Zone 2"                  → zone only
+  //   "M:8-18"                  → row + seat range (no zone)
+  //   "Zone 2|M:8-18"           → all three
+  //   "Zone 2|M"                → zone + row (no seat range)
+  //   "M"                       → row only
+  //   "M:8-18:odd"              → + parity filter (lẻ)
+  //   "Zone 2|M:1-9:even"       → zone + row + seat + parity (chẵn)
+  //   "Zone 2|K:*:odd"          → zone + row + parity (bất kỳ ghế trong row, chỉ lẻ)
   let zoneFilter = null;
   let rest = raw;
   if (raw.includes("|")) {
@@ -117,15 +120,34 @@ function parsePriority1Zone(raw) {
     rest = raw.slice(idx + 1).trim();
   }
 
+  // Tách parity suffix (:odd / :even cuối)
+  let parity = null;  // null | "odd" | "even"
+  const lowerRest = rest.toLowerCase();
+  if (lowerRest.endsWith(":odd")) {
+    parity = "odd";
+    rest = rest.slice(0, -4);
+  } else if (lowerRest.endsWith(":even")) {
+    parity = "even";
+    rest = rest.slice(0, -5);
+  }
+
   const compact = rest.toUpperCase().replace(/\s/g, "");
 
   // Type "range" — có ":" hoặc có cả row + seat spec
   if (compact.includes(":")) {
     const [left, right] = compact.split(":", 2);
     const rows = parseRowRange(left);
-    const numSpec = parseNumSpec(right);
-    if (rows.length && (numSpec.ranges.length || numSpec.values.size))
-      return { type: "range", raw, rows, numSpec, zoneFilter };
+    // Hỗ trợ wildcard "*" cho seat range — chỉ row + parity
+    let numSpec;
+    if (right === "*" || right === "") {
+      numSpec = null;  // không filter seat number, chỉ filter row + parity
+    } else {
+      numSpec = parseNumSpec(right);
+      if (!numSpec.ranges.length && !numSpec.values.size) numSpec = null;
+    }
+    if (rows.length) {
+      return { type: "range", raw, rows, numSpec, zoneFilter, parity };
+    }
   }
 
   // Type "exact" — seat label như "M-19", "M19", "AA12"
@@ -148,17 +170,25 @@ function parsePriority1Zone(raw) {
   if (zoneFilter && rest) {
     const rows = parseRowRange(compact);
     if (rows.length) {
-      return { type: "range", raw, rows, numSpec: null, zoneFilter };
+      return { type: "range", raw, rows, numSpec: null, zoneFilter, parity };
     }
   }
   // Type "range" — rest chỉ là row name (không zone, không seat) như "M"
   if (!zoneFilter && rest && /^[A-Z]{1,2}$/.test(compact)) {
-    return { type: "range", raw, rows: [compact], numSpec: null, zoneFilter: null };
+    return { type: "range", raw, rows: [compact], numSpec: null, zoneFilter: null, parity };
   }
 
   // Type "text" — fallback. norm dùng zoneFilter nếu có (zone-only case)
   // hoặc rest (text describe zone/ghế tự do)
-  return { type: "text", raw, norm: normStr(zoneFilter || rest), zoneFilter };
+  return { type: "text", raw, norm: normStr(zoneFilter || rest), zoneFilter, parity };
+}
+
+// Helper: filter seatNum theo parity (odd/even/null)
+function _matchParity(seatNum, parity) {
+  if (!parity) return true;
+  if (parity === "odd")  return seatNum % 2 === 1;
+  if (parity === "even") return seatNum % 2 === 0;
+  return true;
 }
 
 // Helper: filter tickets theo zone name fuzzy
@@ -213,7 +243,10 @@ function pickAdjacent(tickets, quantity, numOrder) {
 
 // ── Select tickets theo priority ──────────────────────────────────────────────
 
-function selectTickets(tickets, priorities, quantity, requireAdjacent = true, allowSplit = false) {
+function selectTickets(tickets, priorities, quantity, requireAdjacent = true, allowSplit = false, allowPartial = false) {
+  // Nếu allowPartial = true, chấp nhận pick ≥ 1 ghế (thay vì cần đủ quantity)
+  const minRequired = allowPartial ? 1 : quantity;
+
   for (const raw of priorities) {
     const parsed = parsePriority1Zone(raw);
     if (parsed.type === "empty") continue;
@@ -229,7 +262,7 @@ function selectTickets(tickets, priorities, quantity, requireAdjacent = true, al
         if (!found) break;
         selected.push(found);
       }
-      if (selected.length >= quantity) return { selected: selected.slice(0, quantity), reason: `exact:${raw}` };
+      if (selected.length >= minRequired) return { selected: selected.slice(0, quantity), reason: `exact:${raw}` };
       continue;
     }
 
@@ -237,20 +270,23 @@ function selectTickets(tickets, priorities, quantity, requireAdjacent = true, al
       const allowedRows = new Set(parsed.rows);
       const candidates = zoneScoped.filter(t =>
         allowedRows.has(t.rowName) &&
-        (parsed.numSpec ? numAllowed(t.codeNum, parsed.numSpec) : true)
+        (parsed.numSpec ? numAllowed(t.codeNum, parsed.numSpec) : true) &&
+        _matchParity(t.codeNum, parsed.parity)  // NEW: lọc theo lẻ/chẵn nếu có
       );
-      if (candidates.length < quantity) continue;
+      if (candidates.length < minRequired) continue;
 
       for (const row of parsed.rows) {
         const rowTickets = candidates.filter(t => t.rowName === row)
           .sort((a,b) => a.codeNum - b.codeNum);
-        if (rowTickets.length < quantity) continue;
-        if (requireAdjacent) {
+        if (rowTickets.length < minRequired) continue;
+        if (requireAdjacent && rowTickets.length >= quantity) {
           const adj = pickAdjacent(rowTickets, quantity, parsed.numSpec?.order);
           if (adj.length >= quantity) return { selected: adj.slice(0,quantity), reason: `adj-range:${raw}` };
-          if (!allowSplit) continue;
+          if (!allowSplit && !allowPartial) continue;
         }
-        return { selected: rowTickets.slice(0,quantity), reason: `range:${raw}` };
+        // Partial: lấy bao nhiêu có
+        const take = Math.min(rowTickets.length, quantity);
+        return { selected: rowTickets.slice(0,take), reason: `range:${raw}${take < quantity ? `(partial ${take}/${quantity})` : ""}` };
       }
       continue;
     }
@@ -265,20 +301,37 @@ function selectTickets(tickets, priorities, quantity, requireAdjacent = true, al
       );
     } else {
       // Text describe tự do: match trong toàn bộ tickets
+      // FIX Bug B: dùng strict + token-all-must-match với word boundary
+      // → "ZONE 2" KHÔNG match nhầm "ZONE 1" (trước đây norm.includes(hay.split(" ")[0])
+      //   = "zone 2".includes("zone") = true → false positive)
+      const normTokens = norm.split(/\s+/).filter(Boolean);
       candidates = tickets.filter(t => {
         const hay = [t.zoneName, t.ticketClassName, t.label, t.objectId]
           .map(normStr).join(" ");
-        return hay.includes(norm) || norm.includes(hay.split(" ")[0]);
+        // 1) Strict substring (giữ behavior cũ cho case ticket name dài hơn input)
+        if (hay.includes(norm)) return true;
+        // 2) Tất cả token của norm phải xuất hiện trong hay (word boundary)
+        if (!normTokens.length) return false;
+        return normTokens.every(tok => {
+          const escaped = tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          return new RegExp(`\\b${escaped}\\b`).test(hay);
+        });
       }).sort((a,b) => a.codeNum - b.codeNum);
     }
 
-    if (candidates.length < quantity) continue;
-    if (requireAdjacent) {
+    // Apply parity filter (text type cũng support)
+    if (parsed.parity) {
+      candidates = candidates.filter(t => _matchParity(t.codeNum, parsed.parity));
+    }
+
+    if (candidates.length < minRequired) continue;
+    if (requireAdjacent && candidates.length >= quantity) {
       const adj = pickAdjacent(candidates, quantity, []);
       if (adj.length >= quantity) return { selected: adj.slice(0,quantity), reason: `adj-text:${raw}` };
-      if (!allowSplit) continue;
+      if (!allowSplit && !allowPartial) continue;
     }
-    return { selected: candidates.slice(0,quantity), reason: `text:${raw}` };
+    const take = Math.min(candidates.length, quantity);
+    return { selected: candidates.slice(0,take), reason: `text:${raw}${take < quantity ? `(partial ${take}/${quantity})` : ""}` };
   }
   return { selected: [], reason: "no match" };
 }
@@ -304,9 +357,9 @@ function labelVariants(seat) {
 
 // ── Seats.io select qua runInPage ─────────────────────────────────────────────
 
-async function seatsioSelectGroup(labelGroups, expectedCount) {
+async function seatsioSelectGroup(labelGroups, allowPartial = false) {
   return runInPage(function(args) {
-    const { labelGroups, expectedCount } = args;
+    const { labelGroups, allowPartial } = args;
 
     async function mp(v) { return v && typeof v.then === "function" ? await v : v; }
     function simpleErr(e) { try { return String(e?.message || e).slice(0,200); } catch(_) { return "err"; } }
@@ -316,7 +369,7 @@ async function seatsioSelectGroup(labelGroups, expectedCount) {
       const chart = window.seatsio?.charts?.[0];
       if (!chart) return { ok: false, error: "no seatsio chart", logs, selectedCount: 0 };
 
-      logs.push(`chart found | trySelectObjects=${typeof chart.trySelectObjects}`);
+      logs.push(`chart found | trySelectObjects=${typeof chart.trySelectObjects} | allowPartial=${allowPartial}`);
 
       try { await mp(chart.clearSelection()); logs.push("clearSelection OK"); } catch(e) { logs.push("clearSelection err: " + simpleErr(e)); }
 
@@ -328,6 +381,7 @@ async function seatsioSelectGroup(labelGroups, expectedCount) {
       }
 
       const picked = [];
+      const failedIdx = [];
       for (let i = 0; i < labelGroups.length; i++) {
         const variants = labelGroups[i];
         let ok = false;
@@ -345,16 +399,27 @@ async function seatsioSelectGroup(labelGroups, expectedCount) {
           }
         }
         if (!ok) {
+          failedIdx.push(i);
+          if (allowPartial) {
+            // Partial mode: tiếp tục thử các ghế còn lại thay vì abort
+            logs.push(`seat ${i+1} failed — allowPartial=true, tiếp tục thử ghế kế tiếp`);
+            continue;
+          }
           const cnt = await getSelected();
           return { ok: false, error: `seat ${i+1} failed`, logs, selectedCount: cnt, pickedLabels: picked };
         }
       }
 
       const cnt = await getSelected();
-      const success = expectedCount ? cnt >= expectedCount : picked.length === labelGroups.length;
-      return { ok: success, logs, selectedCount: cnt, pickedLabels: picked };
+      // Non-partial: cần đủ tất cả ghế. Partial: cần ≥1 ghế.
+      const minRequired = allowPartial ? 1 : labelGroups.length;
+      const success = cnt >= minRequired;
+      if (allowPartial && failedIdx.length) {
+        logs.push(`partial result: ${cnt}/${labelGroups.length} ghế OK, ${failedIdx.length} fail (idx=${failedIdx.join(",")})`);
+      }
+      return { ok: success, logs, selectedCount: cnt, pickedLabels: picked, failedIdx };
     })();
-  }, { labelGroups, expectedCount });
+  }, { labelGroups, allowPartial });
 }
 
 // ── Click nút thanh toán sau khi chọn ghế ────────────────────────────────────
@@ -379,8 +444,9 @@ async function run1ZoneSeatMap(cfg) {
   const quantity = parseInt(aseat.quantity) || 1;
   const requireAdjacent = aseat.require_adjacent !== false;
   const allowSplit = !!aseat.allow_split_seats;
+  const allowPartial = !!aseat.allow_partial;  // NEW: chấp nhận pick < quantity
 
-  svpLog(`🗺️ 1Zone seat_map | priority=${priorities.join(",")} | SL=${quantity}`, "blue");
+  svpLog(`🗺️ 1Zone seat_map | priority=${priorities.join(",")} | SL=${quantity}${allowPartial ? " (cho phép mua thiếu)" : ""}`, "blue");
 
   const info = extract1ZoneInfo();
   if (!info.eventId || !info.calendarId) {
@@ -422,11 +488,15 @@ async function run1ZoneSeatMap(cfg) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat selection loop", "yellow"); return false; }
-    const { selected, reason } = selectTickets(remaining, priorities, quantity, requireAdjacent, allowSplit);
+    const { selected, reason } = selectTickets(remaining, priorities, quantity, requireAdjacent, allowSplit, allowPartial);
 
-    if (selected.length < quantity) {
+    const minRequired = allowPartial ? 1 : quantity;
+    if (selected.length < minRequired) {
       svpLog("❌ Không tìm đủ ghế theo ưu tiên. Không chọn bừa ngoài danh sách.", "red");
       return false;
+    }
+    if (allowPartial && selected.length < quantity) {
+      svpLog(`ℹ️ Chỉ tìm được ${selected.length}/${quantity} ghế — proceed do allow_partial=true`, "yellow");
     }
 
     const labels = selected.map(t => `${t.zoneName} ${t.label}`);
@@ -438,7 +508,7 @@ async function run1ZoneSeatMap(cfg) {
 
     let seatsRes;
     try {
-      seatsRes = await seatsioSelectGroup(labelGroups, quantity);
+      seatsRes = await seatsioSelectGroup(labelGroups, allowPartial);
     } catch(e) {
       svpLog(`❌ Seats.io error: ${e.message}`, "red");
       seatsRes = { ok: false, error: e.message };
@@ -449,7 +519,8 @@ async function run1ZoneSeatMap(cfg) {
     }
 
     if (seatsRes?.ok) {
-      svpLog(`✅ Seats.io đã chọn ${seatsRes.selectedCount}/${quantity} ghế`, "green");
+      const partialNote = seatsRes.selectedCount < quantity ? ` (mua thiếu ${seatsRes.selectedCount}/${quantity})` : "";
+      svpLog(`✅ Seats.io đã chọn ${seatsRes.selectedCount}/${quantity} ghế${partialNote}`, "green");
       await sleep(800);
 
       // Stage 3: setup hook capture orderId TRƯỚC khi click Thanh toán
@@ -520,15 +591,26 @@ async function run1ZoneSeatMap(cfg) {
       return false;
     }
 
-    // Seats.io fail → bỏ ghế này, thử tiếp
-    const failedIds = new Set(selected.map(t => t._id).filter(Boolean));
+    // Seats.io fail — CHỈ loại ghế THẬT SỰ fail, giữ ghế đã select OK
+    // (Trước fix: loại CẢ selected → next iteration phải tìm lại từ đầu — lãng phí)
+    // Sau fix: dùng pickedLabels từ Seats.io → chỉ loại ghế không có trong picked
+    const pickedSet = new Set((seatsRes?.pickedLabels || []).map(l => l.toLowerCase()));
+    const failedSeats = selected.filter(t => {
+      // Check label hoặc objectId xem có trong pickedSet không
+      const variants = [t.label, t.objectId, `${t.rowName}-${t.code}`, `${t.rowName}${t.code}`]
+        .filter(Boolean).map(s => s.toLowerCase());
+      return !variants.some(v => pickedSet.has(v) || [...pickedSet].some(p => p.includes(v)));
+    });
+    const pickedSeats = selected.filter(t => !failedSeats.includes(t));
+
+    const failedIds = new Set(failedSeats.map(t => t._id).filter(Boolean));
     if (!failedIds.size || [...failedIds].every(id => triedIds.has(id))) {
       svpLog("❌ Seats.io không chọn được và không còn candidate mới.", "red");
       return false;
     }
     failedIds.forEach(id => triedIds.add(id));
     remaining = remaining.filter(t => !triedIds.has(t._id));
-    svpLog(`↪️ Bỏ qua ghế không select được, thử tiếp. Đã loại ${triedIds.size} ghế.`, "yellow");
+    svpLog(`↪️ Loại ${failedIds.size} ghế fail (giữ ${pickedSeats.length} ghế đã select OK), thử tiếp. Tổng loại: ${triedIds.size}.`, "yellow");
   }
 
   svpLog("❌ Thử nhiều candidate nhưng chưa chọn được ghế trên Seats.io.", "red");
