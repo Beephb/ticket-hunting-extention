@@ -141,7 +141,9 @@
 
     /**
      * Pre-flight check trước Phase 2 reserve.
-     * KHÔNG tự refresh (frontend Ticketbox handle). Chỉ log warning nếu sắp hết.
+     * Nếu token sắp/đã expire → trigger frontend refresh bằng cách dispatch
+     * fetch dummy. Frontend axios interceptor sẽ catch 401 và auto refresh
+     * cookie TBoxJWT mới.
      */
     async preFlightCheck() {
       _refreshState();
@@ -157,17 +159,74 @@
         : -1;
 
       if (remainingMs < 0) {
-        if (window.svpLog) window.svpLog(`⚠️ TB access_token EXPIRED ${-Math.round(remainingMs/1000)}s ago — chờ frontend refresh`, "yellow");
+        if (window.svpLog) window.svpLog(`⚠️ TB access_token EXPIRED ${-Math.round(remainingMs/1000)}s ago — thử trigger frontend refresh`, "yellow");
       } else {
-        if (window.svpLog) window.svpLog(`⚠️ TB access_token còn ${Math.round(remainingMs/1000)}s — sắp expire`, "yellow");
+        if (window.svpLog) window.svpLog(`⚠️ TB access_token còn ${Math.round(remainingMs/1000)}s — sắp expire, trigger refresh`, "yellow");
       }
-      return { ok: false, token: _state.accessToken, reason: "expiring_soon", remainingMs };
+
+      // Try trigger frontend refresh
+      const refreshed = await this.triggerRefresh(2500);
+      if (refreshed) {
+        _refreshState();
+        return { ok: this.isValid(), token: _state.accessToken, reason: "refreshed" };
+      }
+
+      return { ok: false, token: _state.accessToken, reason: "expired_refresh_failed", remainingMs };
+    },
+
+    /**
+     * Trigger frontend Ticketbox tự refresh access_token.
+     * Cách: dispatch fetch dummy đến API thường gọi (initialize). Frontend
+     * axios interceptor sẽ thấy token sắp/đã hết → tự call /refresh_token.
+     * Sau đó cookie TBoxJWT update → extension đọc lại.
+     *
+     * @param {number} maxWaitMs - tối đa chờ refresh complete
+     * @returns {Promise<boolean>} true nếu token đã refresh, false nếu fail/timeout
+     */
+    async triggerRefresh(maxWaitMs = 2500) {
+      const oldToken = _state.accessToken;
+      try {
+        // Call API nhẹ với credentials: include
+        // Axios interceptor của Ticketbox sẽ catch nếu cần refresh
+        await fetch("https://api-v2.ticketbox.vn/event/api/v1/applications/initialize?platform=web", {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://ticketbox.vn",
+            "Referer": "https://ticketbox.vn/",
+          },
+          signal: AbortSignal.timeout(2000),
+        }).catch(() => {});  // Ignore error, only care về cookie update
+      } catch {}
+
+      // Poll cookie change (refresh đổi TBoxJWT)
+      const deadline = Date.now() + maxWaitMs;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 200));
+        _refreshState();
+        if (_state.accessToken !== oldToken) {
+          if (window.svpLog) {
+            const remainingS = _state.accessTokenExp
+              ? Math.round((_state.accessTokenExp * 1000 - Date.now()) / 1000)
+              : "?";
+            window.svpLog(`✅ TB token đã refresh — remaining=${remainingS}s`, "green");
+          }
+          return true;
+        }
+      }
+
+      if (window.svpLog) window.svpLog("⚠️ Trigger refresh: cookie không update sau 2.5s — fail", "yellow");
+      return false;
     },
 
     /**
      * Captcha token cho 1 showing cụ thể.
      * Đọc từ localStorage key: tkc_{user_id}{showing_id}
      * (Frontend Ticketbox tự cache captcha token sau khi user solve).
+     *
+     * SILENT — không log warning ở đây để tránh spam khi caller poll nhanh
+     * (vd waitForResolved poll 200-300ms). Caller tự quyết định có log không.
      */
     getCaptchaToken(showingId) {
       if (!showingId) return null;
@@ -176,10 +235,19 @@
       if (!cached) return null;
       const payload = _parseJwt(cached);
       if (payload?.exp && payload.exp * 1000 < Date.now()) {
-        if (window.svpLog) window.svpLog(`⚠️ TB captcha_token expired cho showing ${showingId}`, "yellow");
-        return null;
+        return null;  // silent — caller log nếu cần
       }
       return cached;
+    },
+
+    /** Check token expired? Phân biệt với "no token cached at all". */
+    isCaptchaExpired(showingId) {
+      if (!showingId) return false;
+      _refreshState();
+      const cached = _readCaptchaFromStorage(showingId);
+      if (!cached) return false;  // no token → not "expired"
+      const payload = _parseJwt(cached);
+      return !!(payload?.exp && payload.exp * 1000 < Date.now());
     },
 
     captchaTokenRemainingMs(showingId) {

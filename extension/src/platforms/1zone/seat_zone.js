@@ -265,7 +265,7 @@ async function clickZoneKonva1Z(zone) {
 
   svpLog(`🔎 Konva zone: ${zone.name} | zoneId=${zone.zoneId} | candidates=${points.length} | ${(points[0].debug || "").slice(0, 200)}`, "blue");
 
-  const offsets = [[0,0],[5,0],[-5,0],[0,5],[0,-5]];
+  const baseOffsets = [[0,0],[5,0],[-5,0],[0,5],[0,-5]];
 
   for (const p of points.slice(0, 10)) {
     if (svpShouldStop()) { svpLog("🛑 Stop signal — abort Konva click", "yellow"); return false; }
@@ -273,6 +273,8 @@ async function clickZoneKonva1Z(zone) {
     const hit = elemAt(bx, by);
     svpLog(`🎯 Thử click zone ${zone.name}: mode=${p.mode} point=(${bx.toFixed(1)},${by.toFixed(1)}) hit=${hit}`, "blue");
 
+    // Anti-detect: shuffle offset order mỗi lần
+    const offsets = shuffleArray(baseOffsets);
     for (const [dx, dy] of offsets) {
       if (svpShouldStop()) return false;
       await realClick(bx + dx, by + dy);

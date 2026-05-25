@@ -266,6 +266,9 @@ async function pollTbEventApi(eventId, preferredDate) {
   const eventUrl = `${API_TB_HUNT}/gin/api/v2/events/${eventId}`;
   svpLog("📡 Ticketbox API Poller — poll event mỗi 300ms", "yellow");
 
+  // Rate limit tracker
+  const rl = window.SVP_RATE_LIMIT?.forHost("api-v2.ticketbox.vn");
+  if (rl) rl.reset();
   let lastWaitLog = 0, lastErrLog = 0;
 
   while (!_huntPollerStopTb) {
@@ -282,6 +285,7 @@ async function pollTbEventApi(eventId, preferredDate) {
       });
 
       if (res.ok) {
+        rl?.onSuccess();
         const data = await res.json();
         const showing = findBestTbShowing(data, preferredDate);
 
@@ -304,6 +308,19 @@ async function pollTbEventApi(eventId, preferredDate) {
             lastErrLog = Date.now();
           }
         }
+      } else if (res.status === 429 || res.status === 503 || res.status === 502) {
+        // Rate limit: exponential backoff
+        if (rl) {
+          const wait = rl.onError429(res.status);
+          if (wait < 0) {
+            svpLog("🛑 Hunt Ticketbox abort — server block IP để tránh ban vĩnh viễn", "red");
+            return null;
+          }
+          await sleep(wait);
+        } else {
+          await sleep(300 + Math.random() * 500);
+        }
+        continue;
       } else {
         if (Date.now() - lastErrLog > 5000) {
           svpLog(`⚠️ Event API HTTP=${res.status}`, "yellow");

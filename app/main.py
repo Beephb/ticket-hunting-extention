@@ -3,6 +3,8 @@
 
 import json
 import os
+import sys
+import secrets
 import threading
 import logging
 import http.client
@@ -12,9 +14,23 @@ from datetime import datetime
 from email.utils import parsedate_to_datetime
 import customtkinter as ctk
 
+# ── Path handling (frozen .exe vs source .py) ────────────────────────────────
+
+def _get_base_dir():
+    """Trả về thư mục chứa config.json + hunt.log.
+    - Khi chạy từ PyInstaller .exe: cùng folder với .exe (portable)
+    - Khi chạy .py trực tiếp: cùng folder main.py
+    """
+    if getattr(sys, "frozen", False):
+        # Running from PyInstaller bundle
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+BASE_DIR = _get_base_dir()
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
-LOG_FILE = "hunt.log"
+LOG_FILE = os.path.join(BASE_DIR, "hunt.log")
 
 def _setup_logging():
     handler = logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8")
@@ -24,8 +40,28 @@ def _setup_logging():
 _setup_logging()
 logger = logging.getLogger(__name__)
 
-CONFIG_FILE = "config.json"
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 API_PORT = 9279
+
+# ── API auth token (handshake-based) ─────────────────────────────────────────
+# Mỗi lần app start, gen token mới và lưu vào file. Extension fetch /handshake
+# để lấy token, cache lại, dùng trong header X-SVP-Auth cho mọi request sau.
+TOKEN_FILE = os.path.join(BASE_DIR, ".api_token")
+
+def _gen_api_token():
+    """Generate random 32-char token, persist to file."""
+    token = secrets.token_urlsafe(32)  # ~43 chars URL-safe base64
+    try:
+        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+            f.write(token)
+    except Exception as e:
+        logger.warning(f"Cannot write {TOKEN_FILE}: {e}")
+    return token
+
+API_TOKEN = _gen_api_token()  # NEW token mỗi lần app start
+
+# Endpoints không cần auth (chỉ handshake để extension lấy token lần đầu)
+_PUBLIC_ENDPOINTS = {"/handshake", "/ping"}
 
 # ── Mode label mapping (UI tiếng Việt ↔ internal key) ────────────────────────
 MODE_LABEL_ZONE = "Chọn zone (khu)"
@@ -145,6 +181,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-SVP-Auth")
         self.end_headers()
         self.wfile.write(body)
 
@@ -152,12 +189,39 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-SVP-Auth")
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
+    def _check_auth(self):
+        """Return True if request authorized.
+        Public endpoints (/handshake, /ping) bypass auth.
+        Mọi endpoint khác cần header X-SVP-Auth khớp API_TOKEN.
+        """
+        # Bỏ query string nếu có
+        path = self.path.split("?", 1)[0]
+        if path in _PUBLIC_ENDPOINTS:
+            return True
+        token = self.headers.get("X-SVP-Auth", "")
+        if not token:
+            return False
+        # Constant-time compare để tránh timing attack
+        return secrets.compare_digest(token, API_TOKEN)
+
+    def _send_401(self):
+        self._send_json(401, {"error": "unauthorized", "hint": "fetch /handshake first"})
+
     def do_GET(self):
         global _ext_last_ping_ts
+        # Auth gate (trừ /handshake + /ping)
+        if not self._check_auth():
+            self._send_401()
+            return
+
+        if self.path == "/handshake":
+            # Trả token cho extension cache
+            self._send_json(200, {"token": API_TOKEN, "version": "2.0.0"})
+            return
         if self.path == "/config":
             _ext_last_ping_ts = time.time()
             self._send_json(200, load_config())
@@ -202,6 +266,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        # Auth gate
+        if not self._check_auth():
+            self._send_401()
+            return
+
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length > 0 else b"{}"
         try:

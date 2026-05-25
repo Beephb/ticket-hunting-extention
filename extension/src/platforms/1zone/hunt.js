@@ -318,6 +318,9 @@ async function poll1ZApi(eventId, calendarId) {
   const apiUrl = `${API_1Z_HUNT}/${eventId}?type=group&calendarId=${encodeURIComponent(calendarId)}`;
   svpLog("📡 API Poller — poll mỗi 200ms", "yellow");
 
+  // Rate limit tracker per host — exponential backoff khi 429/503
+  const rl = window.SVP_RATE_LIMIT?.forHost("prod.1zone.vn");
+  if (rl) rl.reset();  // reset counter khi start hunt mới
   let errors = 0;
 
   while (!_hunt1ZPollerStop) {
@@ -336,6 +339,7 @@ async function poll1ZApi(eventId, calendarId) {
       });
 
       if (res.ok) {
+        rl?.onSuccess();
         const data = await res.json();
         errors = 0;
         const total = (data?.data || []).reduce((s, i) => s + (parseInt(i?.availableTickets || 0)), 0);
@@ -344,7 +348,17 @@ async function poll1ZApi(eventId, calendarId) {
           return true;
         }
       } else if (res.status === 429 || res.status === 503 || res.status === 502) {
-        await sleep(200 + Math.random() * 400);
+        // Rate limit: exponential backoff (module rate_limit.js)
+        if (rl) {
+          const wait = rl.onError429(res.status);
+          if (wait < 0) {
+            svpLog("🛑 Hunt 1Zone abort — server block IP để tránh ban vĩnh viễn", "red");
+            return false;
+          }
+          await sleep(wait);
+        } else {
+          await sleep(200 + Math.random() * 400);
+        }
         continue;
       }
     } catch(e) {

@@ -5,11 +5,72 @@ const API_PORT = 9279;
 const API_BASE = `http://127.0.0.1:${API_PORT}`;
 const CONFIG_POLL_MS = 3000;
 
+// ── API auth token (handshake-based, Fix #2) ────────────────────────────────
+// Desktop gen random token mỗi lần start. Extension fetch /handshake (public)
+// để lấy token, cache vào chrome.storage.local. Mọi request sau kèm X-SVP-Auth.
+// Nếu desktop restart → token mới → request 401 → tự re-handshake.
+let _apiToken = null;
+
+async function _loadCachedToken() {
+  try {
+    const r = await chrome.storage.local.get("svp_api_token");
+    if (r?.svp_api_token) {
+      _apiToken = r.svp_api_token;
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+async function _saveToken(token) {
+  _apiToken = token;
+  try { await chrome.storage.local.set({ svp_api_token: token }); } catch {}
+}
+
+async function _handshake() {
+  try {
+    const res = await fetch(`${API_BASE}/handshake`, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return false;
+    const d = await res.json();
+    if (d?.token) {
+      await _saveToken(d.token);
+      console.log("[BG] ✅ Handshake OK — token cached");
+      return true;
+    }
+  } catch (e) {
+    console.log("[BG] ⚠️ Handshake fail:", e.message);
+  }
+  return false;
+}
+
+// Wrapper fetch — auto include token, auto re-handshake on 401
+async function apiFetch(path, opts = {}) {
+  if (!_apiToken) await _loadCachedToken();
+  if (!_apiToken) await _handshake();
+
+  const headers = { ...(opts.headers || {}) };
+  if (_apiToken) headers["X-SVP-Auth"] = _apiToken;
+
+  let res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+
+  // 401 → token stale (desktop restarted) → re-handshake + retry
+  if (res.status === 401) {
+    console.log("[BG] 🔑 Token stale, re-handshake...");
+    const ok = await _handshake();
+    if (ok) {
+      headers["X-SVP-Auth"] = _apiToken;
+      res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+    }
+  }
+  return res;
+}
+
 // Isolated world content scripts (load theo thứ tự dependencies)
 const CONTENT_SCRIPTS = [
   // Tier 0 — utils + logger (phải load TRƯỚC mọi file dùng svpLog/SVP_MASK)
   "src/utils/mask.js",
   "src/shared/logger.js",
+  "src/utils/rate_limit.js",
   // Tier 1 — content utilities chung
   "src/content/utils.js",
   "src/content/page_bridge_client.js",
@@ -130,7 +191,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
 
 async function fetchConfig() {
   try {
-    const res = await fetch(`${API_BASE}/config`, {
+    const res = await apiFetch("/config", {
       signal: AbortSignal.timeout(2000),
     });
     if (!res.ok) return null;
@@ -147,7 +208,7 @@ async function fetchConfig() {
 async function sendLog(msg, color = "white") {
   if (!_appOnline) return;
   try {
-    await fetch(`${API_BASE}/log`, {
+    await apiFetch("/log", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ msg, color }),
@@ -222,8 +283,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Desktop dispatch theo event name để update UI (reserve card, tokens card...)
     try {
       const p = msg.payload || {};
-      // POST event endpoint
-      fetch(`${API_BASE}/event`, {
+      // POST event endpoint (auth)
+      apiFetch("/event", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(p),

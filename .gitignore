@@ -21,9 +21,13 @@ hunt.log
 app/hunt.log
 app/*.log
 
-# Config có thể chứa data cá nhân (name/phone/email/address user)
+# User config (chứa tên/SDT/email cá nhân — KHÔNG commit)
 # Comment dòng dưới nếu muốn share config template
 app/config.json
+
+# API auth token (gen mới mỗi lần app start — KHÔNG commit)
+app/.api_token
+.api_token
 
 # ─── Test artifacts ─────────────────────────────────────────────────────────
 # HAR file proxy capture chứa cookies/tokens — KHÔNG bao giờ commit
@@ -38,6 +42,7 @@ test_output/
 # ─── IDE & Editor ───────────────────────────────────────────────────────────
 .vscode/
 .idea/
+.vs/
 *.swp
 *.swo
 *~
@@ -45,6 +50,23 @@ test_output/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# ─── PyInstaller build artifacts ────────────────────────────────────────────
+# Build folder + dist folder (chứa .exe tạm + cache)
+build/
+dist/
+
+# Spec backup
+*.spec.bak
+
+# Mọi .exe (build output, không commit)
+*.exe
+
+# Release ZIP package (output của zip.bat)
+release/
+
+# Inno Setup output (nếu sau này dùng)
+installer/
 
 # ─── Chrome Extension build artifacts ───────────────────────────────────────
 extension/dist/

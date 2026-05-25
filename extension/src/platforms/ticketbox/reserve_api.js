@@ -46,20 +46,26 @@
    * }
    */
   async function submitTicketInfo({ eventId, showingId, date, items, campaign, timeoutMs = 1500 }) {
+    return await _submitWithRetry({ eventId, showingId, date, items, campaign, timeoutMs }, 0);
+  }
+
+  // Internal: retry tối đa 1 lần on 401 (sau khi trigger refresh)
+  async function _submitWithRetry(args, retryCount) {
+    const { eventId, showingId, date, items, campaign, timeoutMs } = args;
     const tokenMgr = window.__SVP_TB_TOKEN__;
     if (!tokenMgr) {
       return _failed("token_manager_missing", "Token manager chưa load");
     }
 
-    // Pre-flight check
+    // Pre-flight check — sẽ tự trigger refresh nếu cần (Fix #3)
     const preFlight = await tokenMgr.preFlightCheck();
-    if (!preFlight.ok) {
-      if (preFlight.reason === "no_token_login_required") {
-        return _failed("not_logged_in", "Chưa login Ticketbox — vui lòng login trên tab");
-      }
-      // Token sắp/đã expire — vẫn cố thử (frontend có thể refresh giữa chừng)
+    if (!preFlight.ok && preFlight.reason === "no_token_login_required") {
+      return _failed("not_logged_in", "Chưa login Ticketbox — vui lòng login trên tab");
+    }
+    if (!preFlight.ok && retryCount === 0) {
+      // Token vẫn expire sau pre-flight refresh — vẫn cố thử, nếu 401 sẽ retry
       if (window.svpLog) {
-        window.svpLog(`⚠️ TB reserve với token expire (${preFlight.reason}) — vẫn thử`, "yellow");
+        window.svpLog(`⚠️ TB reserve với token expire (${preFlight.reason}) — vẫn thử, sẽ retry nếu 401`, "yellow");
       }
     }
 
@@ -111,6 +117,19 @@
       return _failed("network_error", e.message);
     }
 
+    // Rate limit check — reserve endpoint cũng có thể 429
+    const rl = window.SVP_RATE_LIMIT?.forHost("api-v2.ticketbox.vn");
+    if (res.status === 429 || res.status === 503) {
+      if (rl) {
+        const wait = rl.onError429(res.status);
+        if (window.svpLog) {
+          window.svpLog(`⏸ TB reserve rate-limited (${res.status}) — wait ${wait}ms trước retry`, "yellow");
+        }
+      }
+      return _failed("rate_limited", `HTTP ${res.status} — server limit, fallback Konva`);
+    }
+    rl?.onSuccess();
+
     const dur = Math.round(performance.now() - t0);
     let parsed = null;
     try { parsed = JSON.parse(text); } catch {}
@@ -137,8 +156,23 @@
     const errorCode = parsed?.errorCode ?? parsed?.code ?? result?.code;
     const message = parsed?.message ?? result?.message ?? text?.slice(0, 200);
 
+    // RETRY ON 401: token expire giữa flight, thử trigger refresh + retry 1 lần
+    if (res.status === 401 && retryCount === 0) {
+      if (window.svpLog) {
+        window.svpLog(`⚠️ TB reserve 401 (${dur}ms) — trigger refresh + retry 1 lần`, "yellow");
+      }
+      // Re-trigger refresh (đảm bảo cookie đã update)
+      const tokenMgr2 = window.__SVP_TB_TOKEN__;
+      await tokenMgr2?.triggerRefresh(2500);
+      // Brief delay để frontend axios complete
+      await new Promise(r => setTimeout(r, 300));
+      // Recursive retry với retryCount = 1
+      return await _submitWithRetry(args, 1);
+    }
+
     if (window.svpLog) {
-      window.svpLog(`❌ TB reserve FAIL (${dur}ms) status=${res.status} errorCode=${errorCode} msg=${message}`, "red");
+      const retryNote = retryCount > 0 ? ` (sau retry #${retryCount})` : "";
+      window.svpLog(`❌ TB reserve FAIL${retryNote} (${dur}ms) status=${res.status} errorCode=${errorCode} msg=${message}`, "red");
     }
 
     return {

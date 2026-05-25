@@ -99,23 +99,58 @@ function detectPageType() {
   return "other";
 }
 
-// ── Simulate real mouse click ─────────────────────────────────────────────────
+// ── Simulate real mouse click (anti-detect — human-like variance) ────────────
+// Random jitter ±2px + random delays + mousemove hover trước click.
+// Pattern click hiện tại không còn predictable → khó fingerprint hơn.
+
+function _randInt(min, max) {
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
 
 async function realClick(x, y) {
-  const el = document.elementFromPoint(x, y);
+  // Random jitter nhỏ (giữ trong target zone)
+  const jx = x + (Math.random() - 0.5) * 4;  // ±2px
+  const jy = y + (Math.random() - 0.5) * 4;
+
+  const el = document.elementFromPoint(jx, jy);
   const evOpts = {
-    bubbles: true, cancelable: true, clientX: x, clientY: y,
-    screenX: x, screenY: y, view: window,
+    bubbles: true, cancelable: true,
+    clientX: jx, clientY: jy, screenX: jx, screenY: jy,
+    view: window,
+    button: 0, buttons: 1,
   };
-  document.dispatchEvent(new MouseEvent("mousemove", evOpts));
-  await sleep(20);
+
+  // Mô phỏng hover: 2-3 mousemove events trước click (human moves cursor)
+  const hoverSteps = _randInt(2, 3);
+  for (let i = 0; i < hoverSteps; i++) {
+    const ix = jx + (Math.random() - 0.5) * 6;
+    const iy = jy + (Math.random() - 0.5) * 6;
+    document.dispatchEvent(new MouseEvent("mousemove", { ...evOpts, clientX: ix, clientY: iy }));
+    if (el) el.dispatchEvent(new MouseEvent("mouseover", { ...evOpts, clientX: ix, clientY: iy }));
+    await sleep(_randInt(10, 30));
+  }
+
+  // Mousedown → variable hold delay → mouseup → click
   if (el) {
+    el.dispatchEvent(new MouseEvent("mouseenter", evOpts));
     el.dispatchEvent(new MouseEvent("mousedown", evOpts));
-    await sleep(30);
+    await sleep(_randInt(40, 90));  // human click hold: 40-90ms (vs cũ cố định 30)
     el.dispatchEvent(new MouseEvent("mouseup", evOpts));
     el.dispatchEvent(new MouseEvent("click", evOpts));
   }
-  await sleep(80);
+
+  // Random post-click delay
+  await sleep(_randInt(60, 140));
+}
+
+// Shuffle array in place (Fisher-Yates) — dùng để random thứ tự click offsets
+function shuffleArray(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
 // ── Debug: element tại tọa độ ────────────────────────────────────────────────

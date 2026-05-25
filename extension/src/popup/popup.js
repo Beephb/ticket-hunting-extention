@@ -2,6 +2,15 @@
 const API_BASE = "http://127.0.0.1:9279";
 const LOGS = [];
 
+// ── Auth helper — lấy token từ chrome.storage (set bởi background.js) ───────
+async function _authHeaders() {
+  try {
+    const r = await chrome.storage.local.get("svp_api_token");
+    if (r?.svp_api_token) return { "X-SVP-Auth": r.svp_api_token };
+  } catch {}
+  return {};
+}
+
 // ── Clock realtime — sync với desktop's time offset ─────────────────────────
 let _timeOffsetMs = 0;
 let _lastSyncTs = 0;
@@ -10,7 +19,11 @@ let _syncSource = "local";
 async function syncTimeOffset() {
   // Ưu tiên 1: lấy từ desktop /status (đã sync với Google)
   try {
-    const res = await fetch(`${API_BASE}/status`, { signal: AbortSignal.timeout(1500) });
+    const headers = await _authHeaders();
+    const res = await fetch(`${API_BASE}/status`, {
+      headers,
+      signal: AbortSignal.timeout(1500),
+    });
     if (res.ok) {
       const d = await res.json();
       if (d?.timeOffsetMs != null) {
@@ -62,7 +75,11 @@ function tickClock() {
 
 async function fetchConfig() {
   try {
-    const res = await fetch(`${API_BASE}/config`, { signal: AbortSignal.timeout(2000) });
+    const headers = await _authHeaders();
+    const res = await fetch(`${API_BASE}/config`, {
+      headers,
+      signal: AbortSignal.timeout(2000),
+    });
     if (!res.ok) return null;
     return res.json();
   } catch { return null; }
@@ -70,9 +87,10 @@ async function fetchConfig() {
 
 async function saveEnabled(val) {
   try {
+    const headers = { "Content-Type": "application/json", ...(await _authHeaders()) };
     await fetch(`${API_BASE}/config`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ auto_seat: { enabled: val } }),
       signal: AbortSignal.timeout(2000),
     });

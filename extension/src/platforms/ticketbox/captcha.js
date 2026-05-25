@@ -92,10 +92,18 @@
     const tokenMgr = window.__SVP_TB_TOKEN__;
     const showingStr = String(showingId);
 
-    // Step 1: Token đã cached + valid → skip
+    // Step 1: Token đã cached + valid → skip ngay
     if (_hasCachedToken(showingStr)) {
       if (window.svpLog) window.svpLog(`🧩 Captcha đã có token cache cho showing ${showingStr} — proceed`, "gray");
       return true;
+    }
+
+    // Log trạng thái token CHỈ 1 LẦN trước khi vào loop (tránh spam)
+    const wasExpired = tokenMgr?.isCaptchaExpired(showingStr);
+    if (wasExpired) {
+      if (window.svpLog) window.svpLog(`⚠️ TB captcha_token EXPIRED cho showing ${showingStr} — chờ user giải lại`, "yellow");
+    } else {
+      if (window.svpLog) window.svpLog(`ℹ️ TB chưa có captcha cho showing ${showingStr} — chờ user giải`, "gray");
     }
 
     // Step 2: Proactive wait 6s xem captcha có appear không (Q1)
@@ -116,7 +124,15 @@
 
     // Sau 6s không thấy captcha + không có cache → assume không cần
     if (!isCaptchaVisible() && !_hasCachedToken(showingStr)) {
-      if (window.svpLog) window.svpLog("ℹ️ Sau 6s không thấy captcha modal — assume không cần, proceed", "gray");
+      if (wasExpired) {
+        // Token EXPIRED mà captcha không tự hiện → user cần click zone manually để trigger
+        if (window.svpLog) {
+          window.svpLog(`⚠️ Captcha hết hạn nhưng không tự mở. Bot sẽ thử reserve (có thể fail).`, "yellow");
+          window.svpLog(`   → Nếu fail: click 1 zone bất kỳ trên trang để mở captcha, giải xong bấm Alt+2 lại.`, "yellow");
+        }
+      } else {
+        if (window.svpLog) window.svpLog("ℹ️ Sau 6s không thấy captcha modal — assume không cần, proceed", "gray");
+      }
       return true;
     }
 

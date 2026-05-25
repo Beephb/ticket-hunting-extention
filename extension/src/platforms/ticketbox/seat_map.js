@@ -442,11 +442,13 @@ async function clickSeatOnCanvas(seat, allSectionSeats) {
     return false;
   }
 
-  const offsets = [[0,0],[2,0],[-2,0],[0,2],[0,-2],[4,0],[-4,0],[0,4],[0,-4],[6,0],[-6,0],[0,6],[0,-6]];
+  const baseOffsets = [[0,0],[2,0],[-2,0],[0,2],[0,-2],[4,0],[-4,0],[0,4],[0,-4],[6,0],[-6,0],[0,6],[0,-6]];
 
   for (const p of points) {
     if (svpShouldStop()) return false;
     svpLog(`🎯 Thử click ${label}: mode=${p.mode} point=(${p.x.toFixed(1)},${p.y.toFixed(1)}) hit=${elemAt(p.x, p.y)}`, "blue");
+    // Anti-detect: shuffle offset order mỗi lần
+    const offsets = shuffleArray(baseOffsets);
     for (const [dx, dy] of offsets) {
       if (svpShouldStop()) return false;
       await realClick(p.x + dx, p.y + dy);

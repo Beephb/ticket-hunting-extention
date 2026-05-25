@@ -86,7 +86,12 @@ Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Tick
 SanVePro_v2/
 │
 ├── README.md                              # File này
-├── .gitignore                             # Loại trừ logs, config user, HAR file
+├── .gitignore                             # Loại trừ logs, config user, HAR file, build/dist
+├── SanVePro.spec                          # PyInstaller spec — build .exe
+├── build.bat                              # Auto build script Windows
+│
+├── build_assets/                          # ── BUILD RESOURCES ──
+│   └── icon.ico                           # Icon Windows .exe (auto-gen từ extension/icons)
 │
 ├── app/                                   # ── DESKTOP APP (Python) ──
 │   ├── main.py                            # Toàn bộ desktop: UI + API server + time sync
@@ -170,7 +175,15 @@ SanVePro_v2/
 
 ## 🚀 Cài đặt
 
-### 1. Desktop App
+### Option A — Dùng .exe (cho user cuối, không cần Python)
+
+1. Download `SanVePro-v2.0.zip` (chứa `SanVePro.exe` + `extension/` folder)
+2. Extract zip
+3. Chạy `SanVePro.exe` → desktop UI mở, API lắng nghe port 9279
+4. Mở Chrome → `chrome://extensions/` → Bật **Developer mode** → **Load unpacked** → chọn folder `extension/`
+5. Done. Phím tắt `Alt+1/2/3`.
+
+### Option B — Chạy từ source (cho dev)
 
 ```powershell
 cd app
@@ -367,6 +380,122 @@ window.__SVP_TB_CAPTCHA__.isVisible()
 window.__SVP_HOOK__.status()  // MAIN world context
 // → {enabled: true, patterns: [...]}
 ```
+
+---
+
+---
+
+## 🏗 Build .exe + đóng gói gửi khách
+
+### 2 lệnh duy nhất
+
+```powershell
+.\build.bat       # 1. Build dist\SanVePro.exe (~30s - 1 phút)
+.\zip.bat         # 2. Đóng gói release\SanVePro-v2.0.zip (~5s)
+```
+
+→ File `release\SanVePro-v2.0.zip` (~19 MB) sẵn sàng gửi khách.
+
+### Khách cài đặt (5 phút)
+
+1. Extract zip vào folder bất kỳ
+2. Double-click `SanVePro.exe` → app mở
+3. Mở Chrome → `chrome://extensions/` → bật **Developer mode** → **Load unpacked** → chọn folder `extension/`
+4. Phím tắt: `Alt+1` (Hunt + auto chọn ghế)
+
+---
+
+## 🔄 Quy trình cập nhật khi sửa code
+
+Dự án đang phát triển → sửa code thường xuyên. Đây là workflow đầy đủ mỗi lần update:
+
+### A. Sửa code Desktop (`app/main.py`)
+
+```powershell
+# 1. Sửa code trong app/main.py
+# 2. Test trực tiếp source (không cần build)
+cd app
+python main.py
+# Verify UI/logic work → Ctrl+C đóng
+
+# 3. Build lại .exe
+cd ..
+.\build.bat
+# → dist\SanVePro.exe mới ghi đè cái cũ
+
+# 4. Test .exe vừa build
+.\dist\SanVePro.exe
+# Verify chạy giống như chạy source
+
+# 5. Đóng gói + gửi khách
+.\zip.bat
+# → release\SanVePro-v2.0.zip
+```
+
+### B. Sửa code Extension (`extension/src/...`)
+
+```powershell
+# 1. Sửa code .js trong extension/src/
+# 2. Reload extension trong Chrome (không cần build)
+#    - chrome://extensions/ → click icon Reload trên SanVePro
+
+# 3. Test trên tab event
+
+# 4. Đóng gói + gửi khách (chỉ cần re-zip, KHÔNG cần build lại .exe)
+.\zip.bat
+# → release\SanVePro-v2.0.zip
+```
+
+### C. Sửa cả Desktop + Extension
+
+```powershell
+.\build.bat       # Rebuild .exe (desktop changes)
+.\zip.bat         # Repackage zip (gồm cả .exe mới + extension mới)
+```
+
+### D. Đổi version
+
+Khi muốn release version mới (vd 2.1.0):
+
+```powershell
+# 1. Sửa version trong:
+#    - extension/manifest.json    →  "version": "2.1.0"
+#    - app/main.py                →  search "2.0.0" replace toàn bộ
+#    - zip.bat                    →  set VERSION=2.1.0
+#    - SanVePro.spec              →  (không cần, không có version field)
+
+# 2. Build + zip
+.\build.bat
+.\zip.bat
+# → release\SanVePro-v2.1.0.zip
+```
+
+### E. Phía khách update
+
+Khách đã cài v2.0.0, muốn update v2.1.0:
+
+1. Gửi link download `SanVePro-v2.1.0.zip`
+2. Khách:
+   - Đóng `SanVePro.exe` đang chạy
+   - Extract zip mới, **ghi đè lên folder cũ** (config.json + hunt.log giữ nguyên — không bị xoá vì không có trong zip)
+   - Reload extension trong Chrome (`chrome://extensions/` → Reload icon)
+   - Chạy lại `SanVePro.exe`
+
+→ Config user **không mất** vì `config.json` ở folder app, không có trong zip.
+
+---
+
+## 🛠 Troubleshoot build
+
+| Vấn đề | Giải pháp |
+|---|---|
+| `pyinstaller` not found | `build.bat` tự cài. Hoặc manual: `pip install pyinstaller` |
+| `customtkinter` not found | `pip install customtkinter` |
+| `Pillow` không tìm thấy khi gen icon | `pip install Pillow` |
+| Antivirus báo `.exe` là virus | False positive PyInstaller. Add exclusion hoặc code-sign cert (~$200/năm) |
+| `.exe` quá to (>100MB) | Check `excludes` trong `SanVePro.spec` — đã loại matplotlib/PyQt/numpy... |
+| `.exe` chạy nhưng không thấy UI | Trong `SanVePro.spec` đổi `console=False` thành `True` để xem error |
+| Build chậm | Lần đầu chậm vì cache. Từ lần 2 chỉ ~30s |
 
 ---
 
