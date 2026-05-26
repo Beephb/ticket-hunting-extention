@@ -94,6 +94,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   }
+  if (msg.type === "TB_CAPTCHA_STATUS") {
+    const solver = window.__SVP_TB_CAPTCHA_SOLVER__;
+    if (!solver) { sendResponse({ ok: false, reason: "solver_missing" }); return; }
+    solver.getStatus().then(sendResponse).catch(e => sendResponse({ ok: false, reason: "exception", message: e.message }));
+    return true;
+  }
+  if (msg.type === "TB_CAPTCHA_GEN") {
+    const solver = window.__SVP_TB_CAPTCHA_SOLVER__;
+    if (!solver) { sendResponse({ ok: false, reason: "solver_missing" }); return; }
+    solver.gen(msg.showingId).then(sendResponse).catch(e => sendResponse({ ok: false, reason: "exception", message: e.message }));
+    return true;
+  }
+  if (msg.type === "TB_CAPTCHA_CHECK") {
+    const solver = window.__SVP_TB_CAPTCHA_SOLVER__;
+    if (!solver) { sendResponse({ ok: false, reason: "solver_missing" }); return; }
+    solver.check(msg.showingId, msg.key, msg.value)
+      .then(r => {
+        if (r.ok) svpLog(`✅ Captcha pre-solved cho showing ${msg.showingId} — TTL ${Math.round(r.remainingMs/1000)}s`, "green");
+        sendResponse(r);
+      })
+      .catch(e => sendResponse({ ok: false, reason: "exception", message: e.message }));
+    return true;
+  }
   sendResponse({ ok: false });
 });
 

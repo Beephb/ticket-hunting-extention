@@ -20,6 +20,7 @@ Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Tick
 | Konva fallback khi API fail | Ticketbox | ✅ |
 | Auto navigate checkout + fill form | Cả 2 | ✅ |
 | Captcha pause gate (chờ user solve) | Ticketbox | ✅ |
+| **Captcha pre-solve API** (button popup → solve trước giờ mở bán) | Ticketbox | ✅ E2E 2026-05-26 |
 | Stop hunt signal (dừng tức thì) | Cả 2 | ✅ |
 | Desktop UI: clock realtime sync time.is | — | ✅ |
 | Desktop UI: reserve card hiển thị bookingCode + countdown | — | ✅ |
@@ -33,7 +34,7 @@ Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Tick
 |---|---|
 | Ticketbox extension tự refresh access_token | Endpoint `/refresh_token` có field `signature` SHA-256 unknown algorithm — frontend tự handle |
 | 1Zone Tier E3 (mutate body để bypass UI click) | Phase A1 test 2026-05-23: `x-signature` cover body bytes, mutation → 401 |
-| Captcha overlay UI custom | Ticketbox cache token 1h trong `tkc_xxx` — solve 1 lần dùng nhiều giờ |
+| Auto-solve captcha (image processing) | Confidence không đủ ổn định (~70%), pre-solve manual đã đủ nhanh — chỉ làm 1 lần / suất diễn |
 | Auto thanh toán | Payment luôn user-in-the-loop để tránh charge nhầm |
 
 ---
@@ -108,8 +109,9 @@ SanVePro_v2/
 │       │                                  #   + 2-step inject (MAIN trước, content sau)
 │       │
 │       ├── popup/
-│       │   ├── popup.html                 # Toolbar UI (icon extension)
+│       │   ├── popup.html                 # Toolbar UI + captcha solve modal
 │       │   └── popup.js                   # Control panel + clock realtime
+│       │                                  #   + Captcha pre-solve flow (button "Giải")
 │       │
 │       ├── utils/
 │       │   └── mask.js                    # PII/token mask helpers (maskToken/Email/Phone)
@@ -154,6 +156,9 @@ SanVePro_v2/
 │               │                          #   buildZoneItems / buildMapItems helpers
 │               ├── captcha.js             # Captcha detector + waitForResolved
 │               │                          #   Proactive wait 6s + pause/resume
+│               ├── captcha_solver.js      # Pre-solve API: gen + check + auto-retry rotate
+│               │                          #   Write JWT vào localStorage[tkc_{userId}{showingId}]
+│               │                          #   để frontend TB native reuse
 │               ├── seat_zone.js           # API-first reserve → fallback Konva
 │               └── seat_map.js            # API-first reserve → fallback Konva
 │
@@ -290,6 +295,65 @@ Direct nav vào /booking/ hoặc /select-ticket
 
 ---
 
+## 🧩 Pre-solve Captcha (Ticketbox)
+
+Tính năng độc lập với flow chính — giải captcha trước giờ mở bán, lưu token vào storage, lúc rush hour skip luôn modal captcha.
+
+### Cách dùng
+
+1. Trước giờ mở bán **~15-30 phút**, mở tab event/booking Ticketbox
+2. Click icon extension → popup mở
+3. Captcha box hiển thị status:
+   - `🧩 Chưa có captcha` + button **Giải** → click để bắt đầu
+   - `🧩 Còn 47:23` + button OK (xám) → đã có token còn hạn, không cần làm gì
+4. Bấm **Giải** → modal mở với ảnh nền + mảnh ghép
+5. Kéo slider sao cho **mảnh ghép trùng lỗ trong ảnh** → bấm **Xác nhận**
+6. Token JWT TTL 3600s được ghi vào `localStorage[tkc_{userId}{showingId}]`
+7. Khi sale mở, bấm Alt+1: flow reserve **không hiện captcha modal** vì frontend TB tự reuse token đã solve
+
+### Endpoints (đã verify)
+
+| Method | Path | Mục đích |
+|---|---|---|
+| `GET` | `/sapporo/api/v2/capt/gen/{showingId}` | Lấy captcha challenge |
+| `POST` | `/sapporo/api/v2/capt/check/{showingId}` | Submit lời giải → nhận JWT |
+
+Endpoint trên `api-v2.ticketbox.vn`. Headers: `x-tb-access-token` + `x-device-info`. Captcha gen **không yêu cầu fresh access_token** — vẫn 200 OK ngay cả khi token vừa expire.
+
+### Response format `/capt/gen`
+
+```json
+{
+  "data": {
+    "type": "slide" | "rotate",
+    "key": "{showingId}:{hash}",
+    "mobile": false,
+    "slide": { "image": "data:image/jpeg;base64,...", "thumb": "...", "tile_x": 18, "tile_y": 19, "tile_width": 68, "tile_height": 68 },
+    "rotate": { "image": "...", "thumb": "..." }
+  }
+}
+```
+
+`type` random ~50/50 mỗi call. Solver tự retry tới khi ra `slide` (rotate UI chưa support).
+
+### Storage convention
+
+JWT ghi vào `localStorage[tkc_{userId}{showingId}]` (concat trực tiếp, **không có dấu phân tách**). Frontend TB native đọc đúng key này → reuse cho mọi call `/event/api/v1/bookings/*`.
+
+JWT payload:
+```json
+{"verified":true,"user_id":4445570,"device_id":"50ab8f7b...","random":"...","showing_id":62339673251598,"exp":1779379435,"iat":1779375835}
+```
+
+### File liên quan
+
+- [extension/src/platforms/ticketbox/captcha_solver.js](extension/src/platforms/ticketbox/captcha_solver.js) — core logic gen/check/save
+- [extension/src/popup/popup.html](extension/src/popup/popup.html) — captcha box + solve modal
+- [extension/src/popup/popup.js](extension/src/popup/popup.js) — UI logic (status poll 5s, manual slider)
+- [extension/src/content/runner.js](extension/src/content/runner.js) — message handlers `TB_CAPTCHA_STATUS|GEN|CHECK`
+
+---
+
 ## 🔍 Trạng thái thực tế từng platform
 
 ### Ticketbox (Production-ready)
@@ -297,6 +361,7 @@ Direct nav vào /booking/ hoặc /select-ticket
 ```
 ✅ Hunt poll 300ms detect mở bán
 ✅ Captcha pause gate (đợi user solve, max 90s)
+✅ Captcha PRE-SOLVE: button popup giải trước giờ mở bán (TTL 1h)
 ✅ API-first reserve submit-ticket-info (~235ms)
 ✅ bookingCode capture từ response trực tiếp
 ✅ Konva click fallback khi API fail
@@ -307,6 +372,7 @@ Direct nav vào /booking/ hoặc /select-ticket
 **Pre-conditions:**
 - Login Ticketbox (cookie TBoxJWT sẵn)
 - Solve captcha slide 1 lần / suất diễn (token cache TTL 1h)
+- **Tip**: Trước giờ mở bán 15-30 phút, mở popup → bấm "Giải" để pre-solve. Khi sale rush, flow reserve sẽ KHÔNG hiện captcha modal → tiết kiệm 3-8s.
 
 ### 1Zone (Production-ready)
 
@@ -377,8 +443,33 @@ window.__SVP_TB_TOKEN__.status()
 window.__SVP_TB_CAPTCHA__.isVisible()
 // → true/false
 
+window.__SVP_TB_CAPTCHA_SOLVER__.getStatus()
+// → {ok, showingId, hasToken, remainingMs, source}
+
 window.__SVP_HOOK__.status()  // MAIN world context
 // → {enabled: true, patterns: [...]}
+```
+
+### Kiểm tra captcha token đã lưu
+
+```js
+// Liệt kê tất cả captcha tokens cached + remaining time
+Object.keys(localStorage).filter(k => k.startsWith('tkc_')).forEach(k => {
+  const t = localStorage.getItem(k);
+  const b64 = t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+  const p = JSON.parse(atob(b64 + '='.repeat((4 - b64.length%4) % 4)));
+  const remS = Math.round((p.exp*1000 - Date.now())/1000);
+  console.log(k, "| showing:", p.showing_id, "|", remS > 0 ? `✅ còn ${remS}s` : `❌ expired`);
+});
+
+// Xóa token expired
+Object.keys(localStorage).filter(k => k.startsWith('tkc_')).forEach(k => {
+  try {
+    const b64 = localStorage.getItem(k).split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+    const p = JSON.parse(atob(b64 + '='.repeat((4 - b64.length%4) % 4)));
+    if (p.exp*1000 < Date.now()) localStorage.removeItem(k);
+  } catch { localStorage.removeItem(k); }
+});
 ```
 
 ---
@@ -503,10 +594,11 @@ Khách đã cài v2.0.0, muốn update v2.1.0:
 
 - **`tests/phase_a1_signature_test.js`** — Snippet test reverse 1Zone signature
 - Memory files trong `.claude/memory/`:
-  - `project-architecture.md` — Kiến trúc tổng quan
-  - `project-roadmap.md` — 5-stage implementation plan
-  - `ticketbox-token-format.md` — Cookie schema TBoxJWT chi tiết
-  - `onezone-signature-test.md` — Kết quả Phase A1
+  - `project_architecture.md` — Kiến trúc tổng quan
+  - `project_roadmap.md` — 5-stage implementation plan
+  - `ticketbox_token_format.md` — Cookie schema TBoxJWT chi tiết
+  - `ticketbox_captcha_presolve.md` — Endpoints + storage convention pre-solve captcha (2026-05-26)
+  - `onezone_signature_test.md` — Kết quả Phase A1
   - `stage1/3/4_done.md` — Tracking các milestone
 
 ---
@@ -531,7 +623,8 @@ Khách đã cài v2.0.0, muốn update v2.1.0:
 | Issue | Workaround |
 |---|---|
 | Token Ticketbox expire trong flight (>30s idle) | Reload tab để frontend tự refresh |
-| Captcha hết TTL 1h | Solve lại slide trên frontend |
+| Captcha hết TTL 1h | Pre-solve lại qua popup button (15-30 phút trước giờ mở bán) |
+| Captcha type=rotate (xoay ảnh) chưa hỗ trợ solve | Solver tự retry gen tới khi server trả slide (~50/50 mỗi call) |
 | Hook fetch broken trên Ticketbox (Next.js override) | XHR hook vẫn alive → reserve responses vẫn capture |
 | Cloudflare/Ticketbox bot detect | Page-driven approach giảm rủi ro nhưng không zero |
 | 1Zone bundle deploy đổi DOM/Konva | Có Konva fallback nhưng vẫn cần test lại |

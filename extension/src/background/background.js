@@ -83,6 +83,7 @@ const CONTENT_SCRIPTS = [
   "src/platforms/ticketbox/token_manager.js",
   "src/platforms/ticketbox/reserve_api.js",
   "src/platforms/ticketbox/captcha.js",
+  "src/platforms/ticketbox/captcha_solver.js",
   // Tier 3 — platform modules
   "src/platforms/1zone/hunt.js",
   "src/platforms/ticketbox/hunt.js",

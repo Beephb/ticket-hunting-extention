@@ -159,6 +159,9 @@ async function init() {
     if (el) el.addEventListener("click", handler);
   }
 
+  // Captcha pre-solve
+  initCaptchaUI();
+
   bind("btn-hunt-auto", () => sendToTab("HUNT_NOW", "Bắt đầu Hunt + auto chọn ghế"));
   bind("btn-hunt-only", () => sendToTab("HUNT_ONLY", "Bắt đầu Hunt (chỉ navigate)"));
   bind("btn-seat",      () => sendToTab("RUN_NOW", "Gửi lệnh chọn ghế"));
@@ -168,6 +171,227 @@ async function init() {
 }
 
 init();
+
+// ── Captcha pre-solve module ────────────────────────────────────────────────
+let _captchaState = null;       // last status from content script
+let _solveCtx = null;           // { tab, showingId, key, tile_y, naturalWidth }
+let _statusInterval = null;
+
+async function _findTbTab() {
+  try {
+    const tabs = await chrome.tabs.query({ url: ["https://ticketbox.vn/*"] });
+    if (!tabs.length) return null;
+    // Ưu tiên active tab nếu là TB, fallback tab đầu tiên
+    const active = tabs.find(t => t.active);
+    return active || tabs[0];
+  } catch { return null; }
+}
+
+function _fmtRemaining(ms) {
+  if (ms <= 0) return "0:00";
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, "0")}`;
+}
+
+async function _sendToTabAsync(tabId, msg, timeoutMs = 8000) {
+  return new Promise(resolve => {
+    let done = false;
+    const t = setTimeout(() => { if (!done) { done = true; resolve(null); } }, timeoutMs);
+    chrome.tabs.sendMessage(tabId, msg, res => {
+      if (done) return;
+      done = true; clearTimeout(t);
+      if (chrome.runtime.lastError) resolve(null);
+      else resolve(res);
+    });
+  });
+}
+
+async function refreshCaptchaStatus() {
+  const statusEl = document.getElementById("captcha-status");
+  const metaEl = document.getElementById("captcha-meta");
+  const btn = document.getElementById("btn-captcha");
+  if (!statusEl || !btn) return;
+
+  const tab = await _findTbTab();
+  if (!tab) {
+    statusEl.innerHTML = `<span class="err">🧩 Captcha: chưa mở tab Ticketbox</span>`;
+    metaEl.textContent = "";
+    btn.disabled = true;
+    btn.textContent = "Giải";
+    _captchaState = null;
+    return;
+  }
+
+  const res = await _sendToTabAsync(tab.id, { type: "TB_CAPTCHA_STATUS" }, 6000);
+  if (!res) {
+    statusEl.innerHTML = `<span class="err">🧩 Captcha: tab chưa sẵn sàng (reload trang TB)</span>`;
+    metaEl.textContent = "";
+    btn.disabled = true;
+    return;
+  }
+
+  _captchaState = { ...res, tabId: tab.id };
+
+  if (!res.ok) {
+    const reasons = {
+      no_user: "Chưa login Ticketbox",
+      no_showing: "Mở trang event hoặc booking",
+      no_event: "Mở trang event Ticketbox",
+      api_empty: "Event chưa có showing",
+      solver_missing: "Content script chưa load (reload trang TB)",
+      token_mgr_missing: "Token manager chưa load",
+    };
+    statusEl.innerHTML = `<span class="no-token">🧩 ${reasons[res.reason] || res.reason || "lỗi"}</span>`;
+    metaEl.textContent = res.hint || "";
+    btn.disabled = true;
+    return;
+  }
+
+  if (res.hasToken && res.remainingMs > 0) {
+    statusEl.innerHTML = `<span class="has-token">🧩 Còn ${_fmtRemaining(res.remainingMs)}</span>`;
+    metaEl.textContent = `Showing ${res.showingId} · token valid`;
+    btn.disabled = true;
+    btn.textContent = "OK";
+  } else {
+    statusEl.innerHTML = `<span class="no-token">🧩 Chưa có captcha</span>`;
+    metaEl.textContent = `Showing ${res.showingId}`;
+    btn.disabled = false;
+    btn.textContent = "Giải";
+  }
+}
+
+async function startSolve() {
+  const btn = document.getElementById("btn-captcha");
+  if (!_captchaState || !_captchaState.ok || _captchaState.hasToken) return;
+  btn.disabled = true;
+  btn.textContent = "Đang load...";
+  addLog("🧩 Gọi /capt/gen...");
+
+  const res = await _sendToTabAsync(_captchaState.tabId,
+    { type: "TB_CAPTCHA_GEN", showingId: _captchaState.showingId }, 10000);
+
+  if (!res || !res.ok) {
+    const detail = res ? JSON.stringify(res).slice(0, 200) : "timeout";
+    addLog(`❌ Gen fail: ${detail}`);
+    btn.disabled = false;
+    btn.textContent = "Giải";
+    return;
+  }
+
+  _solveCtx = {
+    tabId: _captchaState.tabId,
+    showingId: _captchaState.showingId,
+    key: res.data.key,
+    tile_y: res.data.tile_y ?? 0,
+    tile_x: res.data.tile_x ?? 0,
+    tile_width: res.data.tile_width ?? 68,
+    tile_height: res.data.tile_height ?? 68,
+  };
+  _showSolveOverlay(res.data);
+  btn.textContent = "Giải";
+}
+
+function _showSolveOverlay(data) {
+  const overlay = document.getElementById("solve-overlay");
+  const img = document.getElementById("solve-img");
+  const thumb = document.getElementById("solve-thumb");
+  const slider = document.getElementById("solve-slider");
+  const aim = document.getElementById("solve-aim");
+  const meta = document.getElementById("solve-meta");
+  const wrap = document.getElementById("solve-img-wrap");
+
+  const tileX = _solveCtx.tile_x || 0;
+  const tileY = _solveCtx.tile_y || 0;
+  const tileW = _solveCtx.tile_width || 68;
+
+  const _normalize = src => src.startsWith("data:") ? src : `data:image/jpeg;base64,${src}`;
+
+  function _layout() {
+    const natW = img.naturalWidth || 300;
+    const natH = img.naturalHeight || 160;
+    const dispW = wrap.clientWidth || 280;
+    const scale = dispW / natW;
+    _solveCtx.naturalWidth = natW;
+    _solveCtx.scale = scale;
+    slider.max = Math.max(0, natW - tileW);
+    slider.value = tileX;
+    const startDispX = tileX * scale;
+    aim.style.left = `${startDispX + tileW * scale / 2}px`;
+    if (data.thumb) {
+      thumb.style.display = "block";
+      thumb.style.left = `${startDispX}px`;
+      thumb.style.top = `${tileY * scale}px`;
+      thumb.style.width = `${tileW * scale}px`;
+      thumb.style.height = `${(_solveCtx.tile_height || tileW) * scale}px`;
+    }
+    meta.textContent = `X = ${tileX} → kéo đến vị trí lỗ`;
+  }
+
+  img.onload = _layout;
+  img.src = _normalize(data.image);
+  if (data.thumb) thumb.src = _normalize(data.thumb);
+  else thumb.style.display = "none";
+
+  slider.oninput = () => {
+    const v = parseInt(slider.value);
+    const scale = _solveCtx.scale || 1;
+    const dispX = v * scale;
+    aim.style.left = `${dispX + tileW * scale / 2}px`;
+    if (data.thumb) thumb.style.left = `${dispX}px`;
+    meta.textContent = `X = ${v} / ${_solveCtx.naturalWidth || "?"}`;
+  };
+
+  overlay.classList.add("open");
+  document.getElementById("btn-confirm").disabled = false;
+}
+
+function _hideSolveOverlay() {
+  document.getElementById("solve-overlay").classList.remove("open");
+  _solveCtx = null;
+}
+
+async function confirmSolve() {
+  if (!_solveCtx) return;
+  const slider = document.getElementById("solve-slider");
+  const x = parseInt(slider.value);
+  const y = _solveCtx.tile_y ?? 0;
+  const confirmBtn = document.getElementById("btn-confirm");
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = "Đang verify...";
+
+  const res = await _sendToTabAsync(_solveCtx.tabId, {
+    type: "TB_CAPTCHA_CHECK",
+    showingId: _solveCtx.showingId,
+    key: _solveCtx.key,
+    value: `${x},${y}`,
+  }, 10000);
+
+  confirmBtn.textContent = "Xác nhận";
+  confirmBtn.disabled = false;
+
+  if (!res || !res.ok) {
+    addLog(`❌ Captcha sai: ${res?.message || res?.reason || "timeout"} — thử lại`);
+    return;
+  }
+
+  addLog(`✅ Captcha OK — TTL ${_fmtRemaining(res.remainingMs)}`);
+  _hideSolveOverlay();
+  await refreshCaptchaStatus();
+}
+
+function initCaptchaUI() {
+  const btn = document.getElementById("btn-captcha");
+  if (btn) btn.addEventListener("click", startSolve);
+  const cancel = document.getElementById("btn-cancel");
+  if (cancel) cancel.addEventListener("click", _hideSolveOverlay);
+  const confirm = document.getElementById("btn-confirm");
+  if (confirm) confirm.addEventListener("click", confirmSolve);
+
+  refreshCaptchaStatus();
+  // Refresh status mỗi 5s để countdown cập nhật + detect token mới
+  _statusInterval = setInterval(refreshCaptchaStatus, 5000);
+}
 
 // Clock: sync 1 lần khi mở popup + tick mỗi 100ms
 syncTimeOffset();
