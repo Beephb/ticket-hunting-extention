@@ -165,28 +165,27 @@ function collectApiZones(showJson, seatmapJson, target) {
     });
 
     if (matchingSections.length === 0) {
-      // Không tìm thấy section nào — push candidate không có sectionId
-      // (Konva fallback sẽ fail, nhưng giữ candidate cho debug)
       candidates.push({
         name: mt.matchedName || mt.tt.name || "",
-        score: mt.score + 40,  // ticket boost
+        score: mt.score + 40,
         ticketTypeId: mt.ttId,
         sectionId: null,
+        maxQtyPerOrder: mt.tt.maxQtyPerOrder ?? 99,
         source: "ticket_only_no_section",
         raw: { ticketType: mt.tt },
       });
       continue;
     }
 
-    // Mỗi section là 1 candidate (cho phép pick section nào sale-able)
     for (const sec of matchingSections) {
       const secId = (sec?.id != null && String(sec.id).match(/^\d+$/)) ? parseInt(sec.id) : null;
       if (!secId) continue;
       candidates.push({
         name: sec.name || mt.matchedName || "",
-        score: mt.score + 40,  // ticket boost
+        score: mt.score + 40,
         ticketTypeId: mt.ttId,
         sectionId: secId,
+        maxQtyPerOrder: mt.tt.maxQtyPerOrder ?? 99,
         source: "ticket+section",
         raw: { ticketType: mt.tt, section: sec },
       });
@@ -624,7 +623,6 @@ async function runTicketboxSeatZone(cfg) {
           break;
         }
 
-        // Tất cả hết vé
         lastErr = `target ${target} hết vé theo API`;
         svpLog(`⏭️ ${lastErr}`, "yellow");
         apiZone = null;
@@ -645,10 +643,36 @@ async function runTicketboxSeatZone(cfg) {
     // Có đủ ticketTypeId + sectionId → thử reserve qua API trước Konva.
     // Nếu fail (no captcha token, expired token, server reject) → fallback Konva.
     if (apiZone && apiZone.ticketTypeId && apiZone.sectionId && window.__SVP_TB_RESERVE__) {
-      const apiResult = await _tryApiReserveZone(info, apiZone, quantity);
-      if (apiResult.success) {
-        svpLog(`🎫 API-first reserve OK — bookingCode=${apiResult.bookingCode}`, "green");
-        // Emit structured event cho desktop UI
+      // Clamp quantity theo maxQtyPerOrder của ticketType
+      const maxQty = apiZone.maxQtyPerOrder ?? 99;
+      let apiQty = Math.min(quantity, maxQty);
+      if (apiQty < quantity) {
+        svpLog(`⚠️ maxQtyPerOrder=${maxQty} — clamp ${quantity}→${apiQty} vé`, "yellow");
+      }
+
+      // Thử reserve, nếu fail do over-qty và allow_partial → giảm dần xuống 1
+      let apiResult = null;
+      while (apiQty >= 1) {
+        apiResult = await _tryApiReserveZone(info, apiZone, apiQty);
+        if (apiResult.success) break;
+
+        const errCode = apiResult.error?.errorCode;
+        const errMsg  = apiResult.error?.message || "";
+        const isQtyError = errCode === -1243
+          || errMsg.includes("tối đa")
+          || errMsg.includes("maximum")
+          || errMsg.includes("chỉ chọn");
+
+        if (isQtyError && allowPartial && apiQty > 1) {
+          svpLog(`⚠️ Server reject qty=${apiQty} (${errMsg}) — thử lại với ${apiQty - 1} vé`, "yellow");
+          apiQty--;
+          continue;
+        }
+        break; // lỗi khác hoặc không cho phép partial → thoát
+      }
+
+      if (apiResult?.success) {
+        svpLog(`🎫 API-first reserve OK — bookingCode=${apiResult.bookingCode} x${apiQty}`, "green");
         if (window.svpEvent) {
           window.svpEvent("reserve.success", {
             platform: "ticketbox",
@@ -658,7 +682,7 @@ async function runTicketboxSeatZone(cfg) {
             showingId: String(info.showingId),
             eventId: String(info.eventId),
             zoneName: apiZone.name,
-            quantity,
+            quantity: apiQty,
             method: "api-first",
             durationMs: apiResult.durationMs,
             checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${info.showingId}/question-form?date=${apiZone._matchedDate}`,
@@ -667,7 +691,7 @@ async function runTicketboxSeatZone(cfg) {
         await _navigateToCheckoutAfterApi(info, apiZone._matchedDate, apiResult.bookingCode);
         return true;
       }
-      svpLog(`⚠️ API-first fail (${apiResult.error?.reason || apiResult.error?.message}) — fallback Konva`, "yellow");
+      svpLog(`⚠️ API-first fail (${apiResult?.error?.reason || apiResult?.error?.message}) — fallback Konva`, "yellow");
     }
 
     // Click Konva zone (fallback hoặc default nếu không đủ data)

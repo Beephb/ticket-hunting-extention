@@ -1,30 +1,23 @@
 // src/platforms/ticketbox/captcha.js
-// Ticketbox slide captcha detector + wait helper.
+// Ticketbox captcha detector + manual-wait helper.
 //
-// Captcha pattern (verified từ proxy HAR):
-//   - GET /sapporo/api/v2/capt/gen/{showingId} → returns data:image/jpeg base64 background
-//   - User solve slide → POST /sapporo/api/v2/capt/check → JWT token
-//   - Token cached vào localStorage[`tkc_${userId}${showingId}`] TTL 1h
-//
-// Bot dùng helper này để pause khi captcha overlay đang hiển thị,
-// chờ user solve, rồi mới tiếp tục flow chọn ghế.
-//
-// REWRITE 2026-05-25:
-//   - Detector tighter: check parent visibility (display/opacity/hidden)
-//   - waitForResolved: poll 200ms, watch localStorage event
-//   - Proactive wait: poll 6s đầu xem captcha có appear không trước khi proceed
-//   - Stop signal aware (svpShouldStop)
+// v5 — bỏ hoàn toàn auto-solve, giữ flow:
+//   1. Token valid  → proceed ngay
+//   2. Captcha chưa hiện → đợi tối đa 6s
+//   3. Captcha hiện → alert + sound + pause bot, poll 200ms chờ token hoặc overlay đóng
+//   4. Timeout 90s → abort
 
-(function() {
+(function () {
   if (window.__SVP_TB_CAPTCHA__) return;
 
-  function _isVisibleElement(el) {
+  // ── DOM detect ────────────────────────────────────────────────────────────────
+
+  function _isVisible(el) {
     try {
       let cur = el;
       while (cur && cur !== document.body) {
         const st = window.getComputedStyle(cur);
-        if (st.display === "none") return false;
-        if (st.visibility === "hidden") return false;
+        if (st.display === "none" || st.visibility === "hidden") return false;
         if (parseFloat(st.opacity || "1") < 0.05) return false;
         cur = cur.parentElement;
       }
@@ -32,169 +25,154 @@
     } catch { return false; }
   }
 
-  /**
-   * Detect captcha slide modal đang VISIBLE thật (chưa bị ẩn).
-   * Slide captcha signature: img với src="data:image/jpeg;base64,..." kích thước > 100x60.
-   * Cộng thêm check parent chain visible để tránh false positive khi modal đóng nhưng DOM còn.
-   */
   function isCaptchaVisible() {
     try {
-      const imgs = document.querySelectorAll('img[src^="data:image/jpeg"]');
-      for (const img of imgs) {
-        const r = img.getBoundingClientRect();
-        if (r.width < 100 || r.height < 60) continue;
-        if (!_isVisibleElement(img)) continue;
-        return true;
+      const selectors = [
+        "[class*='go-captcha']",
+        "[class*='goCaptcha']",
+        "[class*='rotate-captcha']",
+        "[class*='captcha-rotate']",
+        "[class*='captcha-slide']",
+      ];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && _isVisible(el)) return true;
       }
-      // Fallback: modal chứa text captcha + canvas
       const modals = document.querySelectorAll(
-        '.ReactModal__Content--after-open, .ant-modal-content, [role="dialog"][data-state="open"]'
+        ".ReactModal__Content--after-open, .ant-modal-content, [role='dialog']"
       );
-      for (const m of modals) {
-        if (!_isVisibleElement(m)) continue;
-        const r = m.getBoundingClientRect();
-        if (!r || r.width < 100) continue;
-        const txt = String(m.innerText || "").toLowerCase();
-        const hasText = ["trượt", "kéo", "xác minh", "captcha"].some(k => txt.includes(k));
-        if (hasText && m.querySelector("canvas, img")) return true;
+      for (const modal of modals) {
+        if (!_isVisible(modal)) continue;
+        const txt = (modal.innerText || "").toLowerCase();
+        if (["xác minh", "captcha", "xoay", "trượt"].some(k => txt.includes(k))) return true;
       }
       return false;
-    } catch {
-      return false;
+    } catch { return false; }
+  }
+
+  // ── Alert + sound khi captcha xuất hiện ──────────────────────────────────────
+
+  function _alertUser() {
+    // Âm thanh beep qua Web Audio API
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      // 3 beep ngắn
+      [0, 0.25, 0.5].forEach(offset => {
+        const osc  = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.3, ctx.currentTime + offset);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + offset + 0.2);
+        osc.start(ctx.currentTime + offset);
+        osc.stop(ctx.currentTime + offset + 0.2);
+      });
+    } catch {}
+
+    // Indicator overlay
+    if (typeof window.showIndicator === "function") {
+      window.showIndicator(
+        "🧩 CẦN GIẢI CAPTCHA",
+        "Bot đang dừng — xoay ảnh rồi bot tự chạy tiếp",
+        "#f97316"
+      );
     }
   }
 
-  /**
-   * Quick check 1 lần — captcha đang hiện?
-   * Dùng cho proactive detection (chờ captcha appear sau page load).
-   */
+  // ── Token cache ───────────────────────────────────────────────────────────────
+
   function _hasCachedToken(showingId) {
-    const tokenMgr = window.__SVP_TB_TOKEN__;
-    return !!tokenMgr?.getCaptchaToken(String(showingId));
+    return !!window.__SVP_TB_TOKEN__?.getCaptchaToken(String(showingId));
   }
 
-  /**
-   * Chờ captcha được giải.
-   *
-   * Logic mới:
-   *   1. Nếu đã có cached token valid → return ngay
-   *   2. Poll 6s xem captcha có appear naturally không (Q1: proactive wait)
-   *      - Nếu thấy captcha visible → break sang main wait loop
-   *      - Nếu token appear giữa chừng → return true
-   *      - Nếu 6s không thấy gì → return true (assume không cần captcha)
-   *   3. Main wait loop (Q2: poll 200ms, double-check 2 conditions)
-   *      - Token cached → solved (chính tắc nhất)
-   *      - Hoặc captcha overlay gone — wait 1s confirm rồi return
-   *
-   * @returns {Promise<boolean>} true nếu solved/no-need, false nếu timeout/stop
-   */
-  async function waitForResolved(showingId, timeoutMs = 90000) {
-    const tokenMgr = window.__SVP_TB_TOKEN__;
-    const showingStr = String(showingId);
+  // ── waitForResolved ───────────────────────────────────────────────────────────
 
-    // Step 1: Token đã cached + valid → skip ngay
-    if (_hasCachedToken(showingStr)) {
-      if (window.svpLog) window.svpLog(`🧩 Captcha đã có token cache cho showing ${showingStr} — proceed`, "gray");
+  async function waitForResolved(showingId, timeoutMs = 90000) {
+    const sid = String(showingId);
+
+    // Step 1: token đã có → proceed ngay
+    if (_hasCachedToken(sid)) {
+      if (window.svpLog) window.svpLog("🧩 Captcha token cached — proceed", "gray");
       return true;
     }
 
-    // Log trạng thái token CHỈ 1 LẦN trước khi vào loop (tránh spam)
-    const wasExpired = tokenMgr?.isCaptchaExpired(showingStr);
-    if (wasExpired) {
-      if (window.svpLog) window.svpLog(`⚠️ TB captcha_token EXPIRED cho showing ${showingStr} — chờ user giải lại`, "yellow");
-    } else {
-      if (window.svpLog) window.svpLog(`ℹ️ TB chưa có captcha cho showing ${showingStr} — chờ user giải`, "gray");
+    if (window.__SVP_TB_TOKEN__?.isCaptchaExpired?.(sid)) {
+      if (window.svpLog) window.svpLog("⚠️ Captcha token EXPIRED — cần giải lại", "yellow");
     }
 
-    // Step 2: Proactive wait 6s xem captcha có appear không (Q1)
-    if (window.svpLog) window.svpLog(`🧩 Captcha gate: poll 6s xem captcha có hiện không...`, "gray");
-    const initialDeadline = Date.now() + 6000;
-    while (Date.now() < initialDeadline) {
-      if (window.svpShouldStop?.()) return false;
-      await new Promise(r => setTimeout(r, 300));
-      if (_hasCachedToken(showingStr)) {
-        if (window.svpLog) window.svpLog("🧩 Captcha solved (token vừa appear)", "green");
+    // Step 2: đợi captcha hiện (tối đa 6s)
+    if (!isCaptchaVisible()) {
+      if (window.svpLog) window.svpLog("🧩 Chờ captcha overlay hiện (max 6s)...", "gray");
+      const appear = Date.now() + 6000;
+      while (Date.now() < appear) {
+        if (window.svpShouldStop?.()) return false;
+        await new Promise(r => setTimeout(r, 300));
+        if (_hasCachedToken(sid)) return true;   // token xuất hiện trong lúc chờ
+        if (isCaptchaVisible()) break;
+      }
+      // Sau 6s vẫn không thấy captcha → không cần giải, proceed
+      if (!isCaptchaVisible()) {
+        if (window.svpLog) window.svpLog("ℹ️ Captcha không hiện sau 6s — proceed", "gray");
         return true;
       }
-      if (isCaptchaVisible()) {
-        if (window.svpLog) window.svpLog("🧩 Captcha modal xuất hiện — sang main wait loop", "yellow");
-        break;
-      }
     }
 
-    // Sau 6s không thấy captcha + không có cache → assume không cần
-    if (!isCaptchaVisible() && !_hasCachedToken(showingStr)) {
-      if (wasExpired) {
-        // Token EXPIRED mà captcha không tự hiện → user cần click zone manually để trigger
-        if (window.svpLog) {
-          window.svpLog(`⚠️ Captcha hết hạn nhưng không tự mở. Bot sẽ thử reserve (có thể fail).`, "yellow");
-          window.svpLog(`   → Nếu fail: click 1 zone bất kỳ trên trang để mở captcha, giải xong bấm Alt+2 lại.`, "yellow");
-        }
-      } else {
-        if (window.svpLog) window.svpLog("ℹ️ Sau 6s không thấy captcha modal — assume không cần, proceed", "gray");
-      }
-      return true;
-    }
-
-    // Step 3: Main wait loop (poll 200ms cho responsive)
-    if (window.svpLog) {
-      window.svpLog(`🧩 Captcha đang hiện — pause bot, chờ user giải (max ${Math.round(timeoutMs/1000)}s)`, "yellow");
-    }
-    if (typeof window.showIndicator === "function") {
-      window.showIndicator("🧩 Đang chờ user giải Captcha", "Bot pause cho đến khi solved", "#f97316");
-    }
+    // Step 3: captcha đang hiện → alert user + pause
+    if (window.svpLog)
+      window.svpLog(`🧩 CAPTCHA xuất hiện — bot dừng, chờ user giải (max ${Math.round(timeoutMs/1000)}s)`, "yellow");
+    _alertUser();
 
     const deadline = Date.now() + timeoutMs;
-    let lastLog = 0;
-    let consecutiveGoneChecks = 0;
+    let lastLog    = 0;
+    let goneCount  = 0;
 
     while (Date.now() < deadline) {
       if (window.svpShouldStop?.()) return false;
       await new Promise(r => setTimeout(r, 200));
 
-      // Condition 1: token cached (most reliable signal)
-      if (_hasCachedToken(showingStr)) {
-        if (window.svpLog) window.svpLog("✅ Captcha solved (token cached vào localStorage)", "green");
-        await new Promise(r => setTimeout(r, 400)); // brief settle
+      // Token cached → solved
+      if (_hasCachedToken(sid)) {
+        if (window.svpLog) window.svpLog("✅ Captcha solved — bot tiếp tục", "green");
+        if (typeof window.showIndicator === "function")
+          window.showIndicator("✅ Captcha OK", "Bot tiếp tục...", "#22c55e");
+        await new Promise(r => setTimeout(r, 300));
         return true;
       }
 
-      // Condition 2: overlay gone — require 3 consecutive checks (600ms) để chắc chắn
+      // Overlay biến mất 3 checks liên tiếp → solved
       if (!isCaptchaVisible()) {
-        consecutiveGoneChecks++;
-        if (consecutiveGoneChecks >= 3) {
-          if (window.svpLog) window.svpLog("✅ Captcha overlay đã đóng (3 checks confirm)", "green");
-          await new Promise(r => setTimeout(r, 400));
+        goneCount++;
+        if (goneCount >= 3) {
+          if (window.svpLog) window.svpLog("✅ Captcha overlay đóng — bot tiếp tục", "green");
+          if (typeof window.showIndicator === "function")
+            window.showIndicator("✅ Captcha OK", "Bot tiếp tục...", "#22c55e");
+          await new Promise(r => setTimeout(r, 300));
           return true;
         }
       } else {
-        consecutiveGoneChecks = 0;
+        goneCount = 0;
       }
 
-      // Log mỗi 10s
+      // Log nhắc nhở mỗi 10s
       if (Date.now() - lastLog > 10000) {
-        if (window.svpLog) {
-          const remaining = Math.round((deadline - Date.now()) / 1000);
-          window.svpLog(`⏳ Vẫn chờ user giải captcha... còn ${remaining}s`, "yellow");
-        }
+        const rem = Math.round((deadline - Date.now()) / 1000);
+        if (window.svpLog) window.svpLog(`⏳ Đang chờ user giải captcha... còn ${rem}s`, "yellow");
         lastLog = Date.now();
       }
     }
 
-    if (window.svpLog) {
-      window.svpLog(`⏰ Captcha timeout sau ${Math.round(timeoutMs/1000)}s — abort flow`, "red");
-    }
+    if (window.svpLog) window.svpLog("⏰ Captcha timeout 90s — abort", "red");
     return false;
   }
 
   // ── Public API ───────────────────────────────────────────────────────────────
+
   window.__SVP_TB_CAPTCHA__ = {
     isVisible: isCaptchaVisible,
     hasCachedToken: _hasCachedToken,
     waitForResolved,
   };
 
-  if (window.svpLog) {
-    window.svpLog("🧩 TB captcha helper loaded (v2 — Q1+Q2 fix)", "blue");
-  }
+  if (window.svpLog) window.svpLog("🧩 TB captcha helper loaded (v5 — manual wait + alert)", "blue");
 })();

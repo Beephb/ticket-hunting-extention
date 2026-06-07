@@ -174,7 +174,7 @@ init();
 
 // ── Captcha pre-solve module ────────────────────────────────────────────────
 let _captchaState = null;       // last status from content script
-let _solveCtx = null;           // { tab, showingId, key, tile_y, naturalWidth }
+let _solveCtx = null;           // { tab, showingId, key, type, angle? }
 let _statusInterval = null;
 
 async function _findTbTab() {
@@ -279,14 +279,20 @@ async function startSolve() {
     return;
   }
 
+  const captchaType = res.data.type; // "rotate" | "slide"
+  addLog(`🧩 Captcha type=${captchaType}`);
+
+  // Hiển thị overlay để user tự kéo/xoay
   _solveCtx = {
     tabId: _captchaState.tabId,
     showingId: _captchaState.showingId,
     key: res.data.key,
+    type: captchaType,
     tile_y: res.data.tile_y ?? 0,
     tile_x: res.data.tile_x ?? 0,
     tile_width: res.data.tile_width ?? 68,
     tile_height: res.data.tile_height ?? 68,
+    angle: 0,
   };
   _showSolveOverlay(res.data);
   btn.textContent = "Giải";
@@ -301,46 +307,84 @@ function _showSolveOverlay(data) {
   const meta = document.getElementById("solve-meta");
   const wrap = document.getElementById("solve-img-wrap");
 
-  const tileX = _solveCtx.tile_x || 0;
-  const tileY = _solveCtx.tile_y || 0;
-  const tileW = _solveCtx.tile_width || 68;
-
+  const captchaType = _solveCtx?.type || "slide";
   const _normalize = src => src.startsWith("data:") ? src : `data:image/jpeg;base64,${src}`;
 
-  function _layout() {
-    const natW = img.naturalWidth || 300;
-    const natH = img.naturalHeight || 160;
-    const dispW = wrap.clientWidth || 280;
-    const scale = dispW / natW;
-    _solveCtx.naturalWidth = natW;
-    _solveCtx.scale = scale;
-    slider.max = Math.max(0, natW - tileW);
-    slider.value = tileX;
-    const startDispX = tileX * scale;
-    aim.style.left = `${startDispX + tileW * scale / 2}px`;
-    if (data.thumb) {
-      thumb.style.display = "block";
-      thumb.style.left = `${startDispX}px`;
-      thumb.style.top = `${tileY * scale}px`;
-      thumb.style.width = `${tileW * scale}px`;
-      thumb.style.height = `${(_solveCtx.tile_height || tileW) * scale}px`;
-    }
-    meta.textContent = `X = ${tileX} → kéo đến vị trí lỗ`;
+  if (captchaType === "rotate") {
+    // Rotate: slider = 0–360°, thumb xoay theo góc
+    img.onload = () => {
+      const dispW = wrap.clientWidth || 280;
+      slider.min = 0;
+      slider.max = 360;
+      slider.value = 180; // start giữa
+      _solveCtx.angle = 180;
+      if (data.thumb) {
+        thumb.style.display = "block";
+        // Căn giữa thumb trên master
+        thumb.style.left = "50%";
+        thumb.style.top = "50%";
+        thumb.style.transform = `translate(-50%, -50%) rotate(${slider.value}deg)`;
+        thumb.style.width = `${dispW * 0.35}px`;
+        thumb.style.height = `${dispW * 0.35}px`;
+        thumb.style.borderRadius = "50%";
+      }
+      aim.style.display = "none";
+      meta.textContent = `Xoay: ${slider.value}° — kéo để khớp ảnh nhỏ với lỗ`;
+    };
+
+    slider.oninput = () => {
+      const angle = parseInt(slider.value);
+      _solveCtx.angle = angle;
+      if (thumb.style.display !== "none") {
+        thumb.style.transform = `translate(-50%, -50%) rotate(${angle}deg)`;
+      }
+      meta.textContent = `Xoay: ${angle}°`;
+    };
+
+  } else {
+    // Slide captcha (cũ)
+    const tileX = _solveCtx.tile_x || 0;
+    const tileY = _solveCtx.tile_y || 0;
+    const tileW = _solveCtx.tile_width || 68;
+
+    img.onload = () => {
+      const natW = img.naturalWidth || 300;
+      const natH = img.naturalHeight || 160;
+      const dispW = wrap.clientWidth || 280;
+      const scale = dispW / natW;
+      _solveCtx.naturalWidth = natW;
+      _solveCtx.scale = scale;
+      slider.min = 0;
+      slider.max = Math.max(0, natW - tileW);
+      slider.value = tileX;
+      const startDispX = tileX * scale;
+      aim.style.left = `${startDispX + tileW * scale / 2}px`;
+      aim.style.display = "";
+      if (data.thumb) {
+        thumb.style.display = "block";
+        thumb.style.borderRadius = "0";
+        thumb.style.transform = "";
+        thumb.style.left = `${startDispX}px`;
+        thumb.style.top = `${tileY * scale}px`;
+        thumb.style.width = `${tileW * scale}px`;
+        thumb.style.height = `${(_solveCtx.tile_height || tileW) * scale}px`;
+      }
+      meta.textContent = `X = ${tileX} → kéo đến vị trí lỗ`;
+    };
+
+    slider.oninput = () => {
+      const v = parseInt(slider.value);
+      const scale = _solveCtx.scale || 1;
+      const dispX = v * scale;
+      aim.style.left = `${dispX + tileW * scale / 2}px`;
+      if (data.thumb) thumb.style.left = `${dispX}px`;
+      meta.textContent = `X = ${v} / ${_solveCtx.naturalWidth || "?"}`;
+    };
   }
 
-  img.onload = _layout;
   img.src = _normalize(data.image);
   if (data.thumb) thumb.src = _normalize(data.thumb);
   else thumb.style.display = "none";
-
-  slider.oninput = () => {
-    const v = parseInt(slider.value);
-    const scale = _solveCtx.scale || 1;
-    const dispX = v * scale;
-    aim.style.left = `${dispX + tileW * scale / 2}px`;
-    if (data.thumb) thumb.style.left = `${dispX}px`;
-    meta.textContent = `X = ${v} / ${_solveCtx.naturalWidth || "?"}`;
-  };
 
   overlay.classList.add("open");
   document.getElementById("btn-confirm").disabled = false;
@@ -354,17 +398,25 @@ function _hideSolveOverlay() {
 async function confirmSolve() {
   if (!_solveCtx) return;
   const slider = document.getElementById("solve-slider");
-  const x = parseInt(slider.value);
-  const y = _solveCtx.tile_y ?? 0;
   const confirmBtn = document.getElementById("btn-confirm");
   confirmBtn.disabled = true;
   confirmBtn.textContent = "Đang verify...";
+
+  // Rotate: value = góc (0–360), Slide: value = "x,y"
+  let value;
+  if (_solveCtx.type === "rotate") {
+    value = String(_solveCtx.angle ?? parseInt(slider.value));
+  } else {
+    const x = parseInt(slider.value);
+    const y = _solveCtx.tile_y ?? 0;
+    value = `${x},${y}`;
+  }
 
   const res = await _sendToTabAsync(_solveCtx.tabId, {
     type: "TB_CAPTCHA_CHECK",
     showingId: _solveCtx.showingId,
     key: _solveCtx.key,
-    value: `${x},${y}`,
+    value,
   }, 10000);
 
   confirmBtn.textContent = "Xác nhận";
@@ -388,8 +440,25 @@ function initCaptchaUI() {
   const confirm = document.getElementById("btn-confirm");
   if (confirm) confirm.addEventListener("click", confirmSolve);
 
+  // Queue status display — lắng nghe event từ content script qua background
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === "SVP_QUEUE_UPDATE") {
+      const queueEl = document.getElementById("queue-status");
+      if (!queueEl) return;
+      if (msg.status === "QUEUE") {
+        queueEl.textContent = `⏳ Hàng đợi: vị trí #${msg.position}`;
+        queueEl.style.color = "#facc15";
+      } else if (msg.status === "BOOKING") {
+        queueEl.textContent = `🚀 Đến lượt! Còn ${msg.expireIn}s`;
+        queueEl.style.color = "#22c55e";
+      } else {
+        queueEl.textContent = "";
+      }
+    }
+  });
+
   refreshCaptchaStatus();
-  // Refresh status mỗi 5s để countdown cập nhật + detect token mới
+  // Refresh status mỗi 5s
   _statusInterval = setInterval(refreshCaptchaStatus, 5000);
 }
 

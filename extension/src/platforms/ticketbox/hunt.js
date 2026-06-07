@@ -74,7 +74,14 @@ function isTbHuntShowingOpen(showing) {
 function findBestTbShowing(eventJson, preferredDate) {
   try {
     const result = eventJson?.data?.result || {};
-    const showings = (result.showings || []).filter(s => String(s?.id || "") !== "" && String(s?.id || "") !== "0");
+    // ⚠️ FIX: loại showingId = 0 (chưa mở bán, placeholder)
+    // Dùng kiểm tra explicit thay vì || "" để tránh falsy trap
+    const showings = (result.showings || []).filter(s => {
+      const id = s?.id;
+      if (id === null || id === undefined) return false;
+      if (String(id) === "0") return false; // placeholder chưa mở bán
+      return true;
+    });
     if (!showings.length) return null;
 
     const salable = showings.filter(isTbHuntShowingOpen);
@@ -136,11 +143,35 @@ function detectTbPageState() {
 }
 
 // ── Chờ thoát queue Ticketbox ─────────────────────────────────────────────────
+//
+// Ưu tiên dùng __SVP_TB_QUEUE__.waitForBookingTurn() — poll API trực tiếp.
+// Fallback sang DOM-watch nếu module chưa load.
 
-async function waitTbQueueExit(timeoutMs = 180000) {
-  svpLog("⏳ Ticketbox đang trong queue — chờ tự redirect...", "yellow");
+async function waitTbQueueExit(showingId, captchaToken, timeoutMs = 900000) {
+  // Thử dùng queue watcher API-based (chính xác hơn, biết position)
+  const queueModule = window.__SVP_TB_QUEUE__;
+  if (queueModule && captchaToken && showingId) {
+    svpLog("⏳ Dùng Queue Watcher API (poll /queue/v1/showing/status)...", "yellow");
+    const result = await queueModule.waitForBookingTurn(showingId, captchaToken, {
+      timeoutMs,
+      onPosition: pos => {
+        // Position cập nhật → svpLog đã log trong module rồi
+      },
+    });
+    if (result.ok) {
+      svpLog(`✅ Queue → BOOKING! expireIn=${result.expireIn}s`, "green");
+      return true;
+    }
+    if (result.reason === "stopped") return false;
+    svpLog(`⚠️ Queue watcher kết thúc: ${result.reason}`, "yellow");
+    return false;
+  }
+
+  // Fallback: DOM watch (cũ) — khi không có captcha token hoặc module chưa load
+  svpLog("⏳ Fallback DOM-watch queue (chờ tự redirect)...", "yellow");
   if (typeof showIndicator === "function")
     showIndicator("🟡 Trong hàng chờ...", "Chờ Ticketbox redirect tự động", "#facc15");
+
   const deadline = Date.now() + timeoutMs;
   let lastLog = 0;
 
@@ -152,7 +183,7 @@ async function waitTbQueueExit(timeoutMs = 180000) {
 
     const state = detectTbPageState();
     if (["captcha", "select", "form"].includes(state)) {
-      svpLog("✅ Đã thoát queue Ticketbox.", "green");
+      svpLog("✅ Đã thoát queue Ticketbox (DOM detect).", "green");
       return true;
     }
 
@@ -173,6 +204,10 @@ async function directTbShowingsAndNav(eventId, showingId, date) {
   const showingsUrl = `${API_TB_HUNT}/event/api/v1/events/showings/${showingId}?date=${date}`;
   const seatmapUrl = `${API_TB_HUNT}/event/api/v1/events/showings/${showingId}/seatmap`;
   const targetUrl = `${WEB_TB_HUNT}/events/${eventId}/bookings/${showingId}/select-ticket`;
+
+  // Lấy captcha token (nếu có) để truyền vào queue watcher
+  const tokenMgr = window.__SVP_TB_TOKEN__;
+  const captchaToken = tokenMgr?.getCaptchaToken?.(showingId) || null;
 
   svpLog(`🚀 GET trực tiếp showings/${showingId}?date=${date}`, "green");
   try {
@@ -220,7 +255,7 @@ async function directTbShowingsAndNav(eventId, showingId, date) {
     lastState = state;
 
     if (state === "queue") {
-      const ok = await waitTbQueueExit(180000);
+      const ok = await waitTbQueueExit(showingId, captchaToken, 900000);
       if (!ok) return false;
       // Sau khi thoát queue, loop tiếp để nhận captcha/select/form
       const newDeadline = Date.now() + 15000;

@@ -95,26 +95,54 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
   if (msg.type === "TB_CAPTCHA_STATUS") {
-    const solver = window.__SVP_TB_CAPTCHA_SOLVER__;
-    if (!solver) { sendResponse({ ok: false, reason: "solver_missing" }); return; }
-    solver.getStatus().then(sendResponse).catch(e => sendResponse({ ok: false, reason: "exception", message: e.message }));
-    return true;
-  }
-  if (msg.type === "TB_CAPTCHA_GEN") {
-    const solver = window.__SVP_TB_CAPTCHA_SOLVER__;
-    if (!solver) { sendResponse({ ok: false, reason: "solver_missing" }); return; }
-    solver.gen(msg.showingId).then(sendResponse).catch(e => sendResponse({ ok: false, reason: "exception", message: e.message }));
+    const captcha = window.__SVP_TB_CAPTCHA__;
+    const tokenMgr = window.__SVP_TB_TOKEN__;
+    if (!captcha || !tokenMgr) { sendResponse({ ok: false, reason: "modules_missing" }); return; }
+    // Lấy showingId từ URL hoặc API
+    (async () => {
+      try {
+        // Thử lấy showingId từ URL trước
+        const urlM = location.href.match(/\/bookings\/(\d{6,})|\/queue\/(\d{6,})/);
+        const showingId = urlM ? (urlM[1] || urlM[2]) : null;
+        if (!showingId) { sendResponse({ ok: false, reason: "no_showing" }); return; }
+        const remainingMs = tokenMgr.captchaTokenRemainingMs(showingId);
+        sendResponse({ ok: true, showingId, hasToken: remainingMs > 0, remainingMs });
+      } catch(e) { sendResponse({ ok: false, reason: e.message }); }
+    })();
     return true;
   }
   if (msg.type === "TB_CAPTCHA_CHECK") {
-    const solver = window.__SVP_TB_CAPTCHA_SOLVER__;
-    if (!solver) { sendResponse({ ok: false, reason: "solver_missing" }); return; }
-    solver.check(msg.showingId, msg.key, msg.value)
-      .then(r => {
-        if (r.ok) svpLog(`✅ Captcha pre-solved cho showing ${msg.showingId} — TTL ${Math.round(r.remainingMs/1000)}s`, "green");
-        sendResponse(r);
-      })
-      .catch(e => sendResponse({ ok: false, reason: "exception", message: e.message }));
+    // Popup manual solve: user kéo tay → popup gọi /capt/check qua đây
+    const tokenMgr = window.__SVP_TB_TOKEN__;
+    if (!tokenMgr) { sendResponse({ ok: false, reason: "token_mgr_missing" }); return; }
+    const headers = tokenMgr.buildHeaders();
+    (async () => {
+      try {
+        const res = await fetch(
+          `https://api-v2.ticketbox.vn/sapporo/api/v2/capt/check/${msg.showingId}`,
+          { method: "POST", credentials: "include", headers,
+            body: JSON.stringify({ key: msg.key, value: msg.value }),
+            signal: AbortSignal.timeout(8000) }
+        );
+        if (!res.ok) { sendResponse({ ok: false, reason: `http_${res.status}` }); return; }
+        const json = await res.json();
+        const token = json?.data?.token;
+        if (!token?.startsWith("eyJ")) {
+          sendResponse({ ok: false, reason: "no_token", message: json?.message }); return;
+        }
+        // Lưu token
+        const userId = tokenMgr.getUserId();
+        try { localStorage.setItem(`tkc_${userId}${msg.showingId}`, token); } catch {}
+        let remainingMs = 0;
+        try {
+          const b64 = token.split(".")[1].replace(/-/g,"+").replace(/_/g,"/");
+          const pl = JSON.parse(atob(b64 + "=".repeat((4-b64.length%4)%4)));
+          if (pl?.exp) remainingMs = Math.max(0, pl.exp*1000 - Date.now());
+        } catch {}
+        svpLog(`✅ Captcha manual solved — TTL ${Math.round(remainingMs/1000)}s`, "green");
+        sendResponse({ ok: true, remainingMs });
+      } catch(e) { sendResponse({ ok: false, reason: "fetch_error", message: e.message }); }
+    })();
     return true;
   }
   sendResponse({ ok: false });
