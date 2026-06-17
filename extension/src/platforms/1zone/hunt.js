@@ -96,6 +96,19 @@ function extract1ZHuntInfo() {
     out.bookingUrl = `${WEB_1Z_HUNT}/booking/${out.slug}?calendarId=${out.calendarId}`;
   }
 
+  // world:"MAIN" không có quyền chrome.storage — gửi message cho background lưu hộ
+  if (out.eventId && out.calendarId) {
+    try {
+      chrome.runtime.sendMessage({
+        type: "SVP_SAVE_EVENT_INFO",
+        eventId: out.eventId,
+        calendarId: out.calendarId,
+      });
+    } catch (e) {
+      console.log('[SVP] ❌ Lỗi sendMessage SVP_SAVE_EVENT_INFO:', e.message);
+    }
+  }
+
   return out;
 }
 

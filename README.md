@@ -19,9 +19,10 @@ Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Tick
 | XHR hook capture orderId/bookingCode | Cả 2 | ✅ |
 | Konva fallback khi API fail | Ticketbox | ✅ |
 | Auto navigate checkout + fill form | Cả 2 | ✅ |
-| Captcha pause gate (chờ user solve) | Ticketbox | ✅ |
-| **Captcha pre-solve API** (button popup → solve trước giờ mở bán) | Ticketbox | ✅ E2E 2026-05-26 |
 | Stop hunt signal (dừng tức thì) | Cả 2 | ✅ |
+| **Seat availability panel** (popup dropdown Còn/Hết theo zone) | 1Zone | ✅ |
+| **Seat availability overlay** (hiện Còn/Hết trực tiếp lên seatmap Konva) | 1Zone | ✅ toggle on/off |
+| **Event info cross-domain sync** (hunt → background → storage.session, đọc được cả lúc đang ở trang queue) | 1Zone | ✅ |
 | Desktop UI: clock realtime sync time.is | — | ✅ |
 | Desktop UI: reserve card hiển thị bookingCode + countdown | — | ✅ |
 | Desktop UI: tokens card hiển thị JWT + captcha cache | — | ✅ |
@@ -34,7 +35,7 @@ Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Tick
 |---|---|
 | Ticketbox extension tự refresh access_token | Endpoint `/refresh_token` có field `signature` SHA-256 unknown algorithm — frontend tự handle |
 | 1Zone Tier E3 (mutate body để bypass UI click) | Phase A1 test 2026-05-23: `x-signature` cover body bytes, mutation → 401 |
-| Auto-solve captcha (image processing) | Confidence không đủ ổn định (~70%), pre-solve manual đã đủ nhanh — chỉ làm 1 lần / suất diễn |
+| Auto-solve captcha (image processing) | Đã bỏ hẳn flow pre-solve UI — thay bằng seat availability panel (xem mục tính năng mới) |
 | Auto thanh toán | Payment luôn user-in-the-loop để tránh charge nhầm |
 
 ---
@@ -109,9 +110,10 @@ SanVePro_v2/
 │       │                                  #   + 2-step inject (MAIN trước, content sau)
 │       │
 │       ├── popup/
-│       │   ├── popup.html                 # Toolbar UI + captcha solve modal
+│       │   ├── popup.html                 # Toolbar UI + seat availability dropdown
 │       │   └── popup.js                   # Control panel + clock realtime
-│       │                                  #   + Captcha pre-solve flow (button "Giải")
+│       │                                  #   + Seat panel (poll /zones mỗi 3s, dropdown Còn/Hết)
+│       │                                  #   + Overlay toggle (inject lên Konva seatmap)
 │       │
 │       ├── utils/
 │       │   └── mask.js                    # PII/token mask helpers (maskToken/Email/Phone)

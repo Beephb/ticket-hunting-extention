@@ -6,7 +6,7 @@ if (window.__SVP_INJECTED__) {
 window.__SVP_INJECTED__ = true;
 
 const _HUNT_FLAG_KEY = "__svp_hunt_done__";
-const _HUNT_FLAG_TTL = 30000; // 30 giây
+const _HUNT_FLAG_TTL = 90 * 60 * 1000; // 90 phút — đủ cover queue dài nhất
 
 let _cfg = null;
 let _enabled = false;
@@ -90,6 +90,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     stopHunt1Zone?.();
     stopHuntTicketbox?.();
     _running = false;
+    // Dừng indicator và clear interval
+    hideIndicator();
+    showIndicator("⚪ Đã dừng", "Hunt đã được tắt", "#64748b");
     svpLog("🛑 Hunt + seat selection đã dừng (stop flag set)", "yellow");
     sendResponse({ ok: true });
     return;

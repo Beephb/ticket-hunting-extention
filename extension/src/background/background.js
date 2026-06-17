@@ -105,7 +105,18 @@ const MAIN_WORLD_SCRIPTS = [
 
 const TARGET_URLS = [
   "https://ticket.1zone.vn/",
+  "https://queue.1zone.vn/",
   "https://ticketbox.vn/",
+];
+
+// Scripts nhẹ chỉ inject vào queue.1zone.vn
+const QUEUE_MAIN_SCRIPTS = [
+  "src/platforms/1zone/queue_hook_main.js",  // MAIN world: hook fetch/XHR
+];
+const QUEUE_ISOLATED_SCRIPTS = [
+  "src/utils/mask.js",
+  "src/shared/logger.js",
+  "src/platforms/1zone/queue_watcher.js",    // ISOLATED world: UI + logic
 ];
 
 // Tab nào đã được inject rồi (key: tabId, value: url đã inject)
@@ -117,8 +128,11 @@ let _appOnline = false;
 // ── Inject content scripts vào tab ───────────────────────────────────────────
 
 async function injectTab(tabId, url) {
-  const isTarget = TARGET_URLS.some(t => url.startsWith(t));
-  if (!isTarget) return;
+  const isTicket = url.startsWith("https://ticket.1zone.vn/");
+  const isQueue  = url.startsWith("https://queue.1zone.vn/");
+  const isTB     = url.startsWith("https://ticketbox.vn/");
+
+  if (!isTicket && !isQueue && !isTB) return;
 
   // Đã inject cho URL này rồi → skip
   if (_injected.get(tabId) === url) {
@@ -130,35 +144,48 @@ async function injectTab(tabId, url) {
   _injected.set(tabId, url);
 
   try {
-    // 1) Inject MAIN world scripts TRƯỚC (page_bridge → network_hook)
-    //    Hook phải sẵn sàng trước khi content scripts dispatch action.
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      files: MAIN_WORLD_SCRIPTS,
-    });
+    if (isQueue) {
+      // queue.1zone.vn: inject MAIN world hook trước, sau đó isolated world
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        files: QUEUE_MAIN_SCRIPTS,
+      });
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: QUEUE_ISOLATED_SCRIPTS,
+      });
+      qLog(`[BG] ✅ Queue watcher injected tab ${tabId}`);
+    } else {
+      // ticket.1zone.vn + ticketbox.vn: inject full stack
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        files: MAIN_WORLD_SCRIPTS,
+      });
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: CONTENT_SCRIPTS,
+      });
+      console.log(`[BG] ✅ Inject xong tab ${tabId}`);
 
-    // 2) Inject content scripts (isolated world)
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: CONTENT_SCRIPTS,
-    });
-    console.log(`[BG] ✅ Inject xong tab ${tabId}`);
-
-    // Gửi config ngay sau inject
-    if (_cachedConfig) {
-      setTimeout(() => {
-        chrome.tabs.sendMessage(tabId, {
-          type: "CONFIG_UPDATE",
-          config: _cachedConfig,
-        }).catch(() => {});
-      }, 500);
+      // Gửi config ngay sau inject
+      if (_cachedConfig) {
+        setTimeout(() => {
+          chrome.tabs.sendMessage(tabId, {
+            type: "CONFIG_UPDATE",
+            config: _cachedConfig,
+          }).catch(() => {});
+        }, 500);
+      }
     }
   } catch (e) {
     console.log(`[BG] ❌ Inject lỗi tab ${tabId}: ${e.message}`);
     _injected.delete(tabId);
   }
 }
+
+function qLog(msg) { console.log(msg); }
 
 // ── Listen navigation events ──────────────────────────────────────────────────
 
@@ -179,6 +206,7 @@ chrome.webNavigation.onDOMContentLoaded.addListener(({ tabId, url, frameId }) =>
 }, {
   url: [
     { hostSuffix: "ticket.1zone.vn" },
+    { hostSuffix: "queue.1zone.vn" },
     { hostSuffix: "ticketbox.vn" },
   ]
 });
@@ -279,6 +307,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendLog(msg.msg, msg.color);
   }
 
+  if (msg.type === "SVP_SAVE_EVENT_INFO") {
+    // world:"MAIN" không có quyền chrome.storage, background lưu hộ
+    chrome.storage.session.set({
+      svp_event_info: { eventId: msg.eventId, calendarId: msg.calendarId },
+    }).then(() => {
+      console.log(`[BG] ✅ Đã lưu svp_event_info: ${msg.eventId} / ${msg.calendarId}`);
+    }).catch(e => {
+      console.log(`[BG] ❌ Lỗi lưu svp_event_info: ${e.message}`);
+    });
+  }
+
   if (msg.type === "EVENT") {
     // Structured event từ svpEvent() — forward TÊN tới /event endpoint
     // Desktop dispatch theo event name để update UI (reserve card, tokens card...)
@@ -374,7 +413,7 @@ chrome.commands.onCommand.addListener(async (command) => {
 pollConfig();
 
 // Inject vào các tab đang mở sẵn
-chrome.tabs.query({ url: ["https://ticket.1zone.vn/*", "https://ticketbox.vn/*"] })
+chrome.tabs.query({ url: ["https://ticket.1zone.vn/*", "https://queue.1zone.vn/*", "https://ticketbox.vn/*"] })
   .then(tabs => tabs.forEach(tab => injectTab(tab.id, tab.url)));
 
 console.log("[BG] Săn Vé Pro started — inject mode");

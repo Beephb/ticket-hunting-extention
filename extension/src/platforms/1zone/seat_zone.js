@@ -4,6 +4,26 @@
 // KHÔNG POST add-to-cart trực tiếp — chờ frontend tự POST sau khi click Tiếp tục
 
 const API_BASE_1Z_ZONE = "https://prod.1zone.vn/ticketing/api";
+const ZONES_CACHE_KEY = "__svp_1z_zones_cache__";
+
+// ── Đọc zones cache từ queue_watcher (preload trong lúc chờ queue) ────────────
+
+async function loadZonesCacheFrom1Z() {
+  try {
+    const result = await chrome.storage.session.get(ZONES_CACHE_KEY);
+    const obj = result?.[ZONES_CACHE_KEY];
+    if (!obj) return null;
+    const age = Date.now() - obj.ts;
+    if (age > 10 * 60 * 1000) {
+      await chrome.storage.session.remove(ZONES_CACHE_KEY);
+      return null;
+    }
+    svpLog(`📦 Dùng zones cache từ prequeue (age=${Math.round(age/1000)}s)`, "green");
+    return obj.data;
+  } catch {
+    return null;
+  }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -65,6 +85,11 @@ function extract1ZZoneInfo() {
 // ── Zones API ─────────────────────────────────────────────────────────────────
 
 async function getZonesApi1Z(eventId, calendarId) {
+  // Thử dùng cache từ queue_watcher trước
+  const cached = await loadZonesCacheFrom1Z();
+  if (cached) return cached;
+
+  // Không có cache → fetch bình thường
   const url = `${API_BASE_1Z_ZONE}/v4/ticket-summary/get-summary-event/${eventId}/zones?calendarId=${encodeURIComponent(calendarId)}`;
   const res = await fetch(url, {
     method: "GET",
@@ -510,7 +535,7 @@ async function run1ZoneSeatZone(cfg) {
   const aseat = cfg.auto_seat || {};
   const priorities = (aseat.zone_priority || aseat.priority_targets || []).map(p => String(p).trim()).filter(Boolean);
   const quantity = Math.max(1, parseInt(aseat.quantity) || 1);
-  const allowPartial = !!aseat.allow_partial;  // NEW: cho phép zone hết vé chỉ mua available
+  const allowPartial = !!aseat.allow_partial;
 
   if (!priorities.length) {
     svpLog("❌ Chưa nhập khu ưu tiên cho 1Zone seat_zone", "red");
@@ -527,7 +552,7 @@ async function run1ZoneSeatZone(cfg) {
     return false;
   }
 
-  // GET zones API
+  // GET zones API (dùng cache nếu có)
   svpLog("📡 GET zones API...", "blue");
   let zonesData;
   try {
@@ -547,17 +572,30 @@ async function run1ZoneSeatZone(cfg) {
 
   let lastErr = null;
   for (let idx = 0; idx < priorities.length; idx++) {
+    if (svpShouldStop()) { svpLog("🛑 Stop signal", "yellow"); return false; }
+
     const wanted = priorities[idx];
     svpLog(`🎯 Thử zone ưu tiên ${idx+1}: ${wanted}`, "yellow");
 
-    const zone = matchZone1Z(zones, wanted, quantity);
+    // Tìm zone match
+    let zone = matchZone1Z(zones, wanted, quantity);
+
+    // allowPartial: nếu không đủ quantity thì lấy zone còn ít nhất 1 vé
+    if (!zone && allowPartial) {
+      zone = matchZone1Z(zones, wanted, 1);
+      if (zone) {
+        const actualQty = Math.min(quantity, zone.available);
+        svpLog(`ℹ️ Zone ${zone.name} chỉ còn ${zone.available}/${quantity} — mua ${actualQty} do allow_partial`, "yellow");
+      }
+    }
+
     if (!zone) {
       lastErr = `không tìm thấy hoặc không đủ vé zone: ${wanted}`;
       svpLog(`⚠️ ${lastErr}`, "yellow");
       continue;
     }
 
-    svpLog(`🧭 Match zone: ${zone.name} | zoneId=${zone.zoneId} | ticketClassId=${zone.ticketClassId || "unknown"} | còn=${zone.available} | SL=${quantity}`, "green");
+    svpLog(`🧭 Match zone: ${zone.name} | zoneId=${zone.zoneId} | ticketClassId=${zone.ticketClassId} | còn=${zone.available} | SL=${quantity}`, "green");
 
     // Click Konva
     if (!await clickZoneKonva1Z(zone)) {
@@ -566,7 +604,7 @@ async function run1ZoneSeatZone(cfg) {
       continue;
     }
 
-    // Set quantity (truyền allowPartial — nếu zone hết vé, accept số lượng available)
+    // Set quantity
     if (!await setQuantity1Z(quantity, allowPartial)) {
       svpLog("⚠️ Đã mở đúng zone nhưng không set được số lượng. Dừng để tránh chọn sai.", "yellow");
       return true;

@@ -14,6 +14,8 @@
 
   "host_permissions": [
     "https://ticket.1zone.vn/*",
+    "https://queue.1zone.vn/*",
+    "https://prod.1zone.vn/*",
     "https://ticketbox.vn/*",
     "http://127.0.0.1:9279/*"
   ],
@@ -58,6 +60,14 @@
       "matches": [
         "https://ticket.1zone.vn/*",
         "https://ticketbox.vn/*"
+      ]
+    },
+    {
+      "resources": [
+        "src/platforms/1zone/queue_hook_main.js"
+      ],
+      "matches": [
+        "https://queue.1zone.vn/*"
       ]
     }
   ]

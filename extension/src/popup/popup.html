@@ -67,41 +67,46 @@
   }
   .clock-sync { font-size: 9px; color: #64748b; margin-left: 4px; }
 
-  /* Captcha section */
-  .captcha-box { background: #111827; border: 1px solid #1e293b; border-radius: 8px;
-    padding: 8px 12px; margin-bottom: 10px; }
-  .captcha-row { display: flex; align-items: center; gap: 8px; }
-  .captcha-status { flex: 1; font-size: 11px; color: #94a3b8; }
-  .captcha-status .has-token { color: #22c55e; font-weight: 600; }
-  .captcha-status .no-token { color: #f59e0b; }
-  .captcha-status .err { color: #ef4444; }
-  .btn-captcha { background: #1e3a8a; color: #bfdbfe; padding: 6px 10px;
-    border: none; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: 600;
-    transition: opacity .15s; }
-  .btn-captcha:hover:not(:disabled) { opacity: .85; }
-  .btn-captcha:disabled { background: #1e293b; color: #475569; cursor: not-allowed; }
-  .captcha-meta { font-size: 10px; color: #64748b; margin-top: 4px; }
+  /* Seat dropdown (xổ danh sách ghế) */
+  .seat-dropdown-wrap { position: relative; display: inline-block; }
+  .btn-seat-toggle {
+    background: #1e293b; color: #94a3b8; border: 1px solid #334155;
+    border-radius: 6px; font-size: 11px; font-weight: 600;
+    padding: 4px 8px; cursor: pointer; white-space: nowrap;
+    transition: background .15s;
+  }
+  .btn-seat-toggle:hover { background: #273548; color: #e2e8f0; }
+  .btn-seat-toggle.has-soldout { color: #ef4444; border-color: #7f1d1d; }
+  .btn-seat-toggle.all-available { color: #22c55e; border-color: #14532d; }
 
-  /* Captcha solve overlay */
-  .solve-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.8);
-    z-index: 999; padding: 12px; overflow-y: auto; }
-  .solve-overlay.open { display: block; }
-  .solve-panel { background: #0f172a; border: 1px solid #334155; border-radius: 10px;
-    padding: 12px; }
-  .solve-title { font-size: 12px; color: #fbbf24; font-weight: 600; margin-bottom: 8px; }
-  .solve-img-wrap { position: relative; background: #000; border-radius: 6px;
-    overflow: hidden; margin-bottom: 8px; }
-  .solve-img-wrap img { display: block; width: 100%; height: auto; user-select: none; }
-  .solve-aim { position: absolute; top: 0; bottom: 0; width: 2px; background: #ef4444;
-    pointer-events: none; box-shadow: 0 0 6px rgba(239,68,68,.8); }
-  .solve-slider { width: 100%; margin: 4px 0 8px; }
-  .solve-meta { font-size: 10px; color: #64748b; margin-bottom: 8px; line-height: 1.4; }
-  .solve-actions { display: flex; gap: 6px; }
-  .solve-actions button { flex: 1; padding: 8px; border: none; border-radius: 6px;
-    font-size: 12px; font-weight: 600; cursor: pointer; }
-  .btn-confirm { background: #15803d; color: #dcfce7; }
-  .btn-cancel { background: #374151; color: #e5e7eb; }
-  .btn-confirm:disabled { background: #1e293b; color: #475569; cursor: not-allowed; }
+  .seat-dropdown {
+    display: none;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    background: #111827;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 6px 0;
+    min-width: 180px;
+    z-index: 99999;
+    box-shadow: 0 4px 16px rgba(0,0,0,.7);
+  }
+  .seat-dropdown.open { display: block; }
+  .seat-dropdown-title {
+    font-size: 10px; color: #475569; font-weight: 600;
+    padding: 2px 12px 6px; border-bottom: 1px solid #1e293b; margin-bottom: 4px;
+  }
+  .seat-drop-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 3px 12px; font-size: 11px; gap: 12px;
+  }
+  .seat-drop-row:hover { background: #1e293b; }
+  .seat-drop-name { color: #cbd5e1; }
+  .seat-drop-status { font-weight: 700; white-space: nowrap; }
+  .seat-drop-status.available { color: #22c55e; }
+  .seat-drop-status.soldout { color: #ef4444; }
+  .seat-drop-empty { font-size: 11px; color: #475569; padding: 4px 12px; }
 </style>
 </head>
 <body>
@@ -125,26 +130,33 @@
 
   <div class="toggle-row">
     <span class="toggle-label">Bot tự động</span>
-    <label class="toggle">
-      <input type="checkbox" id="bot-toggle">
-      <span class="slider"></span>
-    </label>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <!-- Nút xem ghế xổ sang trái -->
+      <div class="seat-dropdown-wrap">
+        <button class="btn-seat-toggle" id="btn-seat-toggle" title="Xem tình trạng ghế">🪑 —</button>
+        <div class="seat-dropdown" id="seat-dropdown">
+          <div class="seat-dropdown-title">TÌNH TRẠNG GHẾ [v10]</div>
+          <div id="seat-drop-list"><div class="seat-drop-empty">Đang tải...</div></div>
+        </div>
+      </div>
+      <!-- Nút overlay trên seatmap -->
+      <button id="btn-overlay-toggle" style="
+        background:#1e293b;color:#64748b;border:1px solid #334155;border-radius:6px;
+        font-size:11px;font-weight:600;padding:4px 8px;cursor:pointer;
+        transition:background .15s;white-space:nowrap;" title="Hiện/ẩn overlay trên seatmap">👁</button>
+      <label class="toggle">
+        <input type="checkbox" id="bot-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
   </div>
+  <div id="queue-status" style="font-size:11px;font-weight:600;margin-bottom:8px;min-height:16px;"></div>
 
   <div class="config-box" id="config-box">
     <div class="row"><span>Platform</span><span class="val" id="cfg-platform">—</span></div>
     <div class="row"><span>Mode</span><span class="val" id="cfg-mode">—</span></div>
     <div class="row"><span>Ưu tiên</span><span class="val" id="cfg-zones">—</span></div>
     <div class="row"><span>Số lượng</span><span class="val" id="cfg-qty">—</span></div>
-  </div>
-
-  <div class="captcha-box">
-    <div class="captcha-row">
-      <div class="captcha-status" id="captcha-status">🧩 Captcha: đang kiểm tra...</div>
-      <button class="btn-captcha" id="btn-captcha" disabled>Giải</button>
-    </div>
-    <div class="captcha-meta" id="captcha-meta"></div>
-    <div id="queue-status" style="font-size:11px; margin-top:4px; font-weight:600;"></div>
   </div>
 
   <div class="log-box" id="log-box">Chờ hoạt động...</div>
@@ -192,23 +204,6 @@
   </div>
 </div>
 <div class="footer">Port 9279 · Alt+1/2/3</div>
-
-<div class="solve-overlay" id="solve-overlay">
-  <div class="solve-panel">
-    <div class="solve-title">🧩 Kéo thanh trượt đến vị trí lỗ trên ảnh</div>
-    <div class="solve-img-wrap" id="solve-img-wrap">
-      <img id="solve-img" alt="captcha">
-      <img id="solve-thumb" alt="piece" style="position:absolute;pointer-events:none;display:none;">
-      <div class="solve-aim" id="solve-aim" style="left:0"></div>
-    </div>
-    <input type="range" class="solve-slider" id="solve-slider" min="0" max="100" value="0">
-    <div class="solve-meta" id="solve-meta">X = 0</div>
-    <div class="solve-actions">
-      <button class="btn-cancel" id="btn-cancel">Hủy</button>
-      <button class="btn-confirm" id="btn-confirm">Xác nhận</button>
-    </div>
-  </div>
-</div>
 
 <script src="popup.js"></script>
 </body>

@@ -159,8 +159,8 @@ async function init() {
     if (el) el.addEventListener("click", handler);
   }
 
-  // Captcha pre-solve
-  initCaptchaUI();
+  // Seat availability panel
+  initSeatPanel();
 
   bind("btn-hunt-auto", () => sendToTab("HUNT_NOW", "Bắt đầu Hunt + auto chọn ghế"));
   bind("btn-hunt-only", () => sendToTab("HUNT_ONLY", "Bắt đầu Hunt (chỉ navigate)"));
@@ -172,275 +172,125 @@ async function init() {
 
 init();
 
-// ── Captcha pre-solve module ────────────────────────────────────────────────
-let _captchaState = null;       // last status from content script
-let _solveCtx = null;           // { tab, showingId, key, type, angle? }
-let _statusInterval = null;
+// ── Seat availability panel ──────────────────────────────────────────────────
+let _seatPollInterval = null;
 
-async function _findTbTab() {
+async function _get1ZoneSeatData() {
+  // Ưu tiên đọc từ chrome.storage.session — được lưu khi hunt chạy, tồn tại qua mọi domain
+  const stored = await chrome.storage.session.get("svp_event_info");
+  let cachedEventId = stored?.svp_event_info?.eventId || null;
+  let cachedCalendarId = stored?.svp_event_info?.calendarId || null;
+
+  const tabs = await chrome.tabs.query({ url: ["https://ticket.1zone.vn/*", "https://queue.1zone.vn/*"] });
+  if (!tabs.length && !cachedEventId) return null;
+
+  let eventId = cachedEventId, calendarId = cachedCalendarId;
+
+  // Nếu chưa có từ storage, thử lấy từ tab ticket.1zone.vn
+  if (!eventId) {
+    for (const tab of tabs) {
+      if (!tab.url.includes('ticket.1zone.vn')) continue;
+      try {
+        const url = new URL(tab.url);
+        calendarId = url.searchParams.get('calendarId') || calendarId;
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            const el = document.querySelector('[id^="seatmap-container-"]');
+            const m = el?.id?.match(/seatmap-container-(\w+)/);
+            return m?.[1] || null;
+          },
+        });
+        eventId = results?.[0]?.result || null;
+        if (eventId) break;
+      } catch {}
+    }
+  }
+
+  if (!eventId || !calendarId) return null;
+
   try {
-    const tabs = await chrome.tabs.query({ url: ["https://ticketbox.vn/*"] });
-    if (!tabs.length) return null;
-    // Ưu tiên active tab nếu là TB, fallback tab đầu tiên
-    const active = tabs.find(t => t.active);
-    return active || tabs[0];
-  } catch { return null; }
+    const res = await fetch(
+      `https://prod.1zone.vn/ticketing/api/v4/ticket-summary/get-summary-event/${eventId}/zones?calendarId=${calendarId}`,
+      { credentials: "include", headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(5000) }
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (!json.data?.length) return null;
+
+    return json.data.map(z => ({
+      name: z.name,
+      available: z.countTicketsAvailable ?? 0,
+    }));
+  } catch {}
+
+  return null;
 }
 
-function _fmtRemaining(ms) {
-  if (ms <= 0) return "0:00";
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  return `${m}:${String(s % 60).padStart(2, "0")}`;
+function renderSeatList(zones) {
+  const list = document.getElementById("seat-drop-list");
+  const btn = document.getElementById("btn-seat-toggle");
+  if (!list || !btn) return;
+
+  if (!zones || !zones.length) {
+    list.innerHTML = '<div class="seat-drop-empty">Mở trang seatmap để xem</div>';
+    btn.textContent = "🪑 —";
+    btn.className = "btn-seat-toggle";
+    return;
+  }
+
+  const hasSoldout = zones.some(z => z.available === 0);
+  const allSoldout = zones.every(z => z.available === 0);
+
+  // Cập nhật nút: chỉ hiện icon + trạng thái tổng
+  if (allSoldout) {
+    btn.textContent = "🪑 Hết";
+    btn.className = "btn-seat-toggle has-soldout";
+  } else if (hasSoldout) {
+    btn.textContent = "🪑 Còn/Hết";
+    btn.className = "btn-seat-toggle has-soldout";
+  } else {
+    btn.textContent = "🪑 Còn";
+    btn.className = "btn-seat-toggle all-available";
+  }
+
+  // Render dropdown list — chỉ hiện còn/hết, không hiện số
+  list.innerHTML = zones.map(z => {
+    const soldout = z.available === 0;
+    return `<div class="seat-drop-row">
+      <span class="seat-drop-name">${z.name}</span>
+      <span class="seat-drop-status ${soldout ? 'soldout' : 'available'}">${soldout ? 'Hết' : 'Còn'}</span>
+    </div>`;
+  }).join("");
 }
 
-async function _sendToTabAsync(tabId, msg, timeoutMs = 8000) {
-  return new Promise(resolve => {
-    let done = false;
-    const t = setTimeout(() => { if (!done) { done = true; resolve(null); } }, timeoutMs);
-    chrome.tabs.sendMessage(tabId, msg, res => {
-      if (done) return;
-      done = true; clearTimeout(t);
-      if (chrome.runtime.lastError) resolve(null);
-      else resolve(res);
+function initSeatPanel() {
+  pollSeatAvailability();
+  _seatPollInterval = setInterval(pollSeatAvailability, 3000);
+
+  // Toggle dropdown xổ sang trái
+  const seatBtn = document.getElementById("btn-seat-toggle");
+  const dropdown = document.getElementById("seat-dropdown");
+  if (seatBtn && dropdown) {
+    seatBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      dropdown.classList.toggle("open");
     });
+    // Click ngoài để đóng
+    document.addEventListener("click", () => dropdown.classList.remove("open"));
+  }
+
+  // Nút overlay
+  const overlayBtn = document.getElementById("btn-overlay-toggle");
+  if (overlayBtn) overlayBtn.addEventListener("click", toggleOverlay);
+
+  // Khôi phục state overlay
+  chrome.storage.local.get("svp_overlay_on", r => {
+    _overlayOn = !!r.svp_overlay_on;
+    _updateOverlayBtn(overlayBtn);
   });
-}
 
-async function refreshCaptchaStatus() {
-  const statusEl = document.getElementById("captcha-status");
-  const metaEl = document.getElementById("captcha-meta");
-  const btn = document.getElementById("btn-captcha");
-  if (!statusEl || !btn) return;
-
-  const tab = await _findTbTab();
-  if (!tab) {
-    statusEl.innerHTML = `<span class="err">🧩 Captcha: chưa mở tab Ticketbox</span>`;
-    metaEl.textContent = "";
-    btn.disabled = true;
-    btn.textContent = "Giải";
-    _captchaState = null;
-    return;
-  }
-
-  const res = await _sendToTabAsync(tab.id, { type: "TB_CAPTCHA_STATUS" }, 6000);
-  if (!res) {
-    statusEl.innerHTML = `<span class="err">🧩 Captcha: tab chưa sẵn sàng (reload trang TB)</span>`;
-    metaEl.textContent = "";
-    btn.disabled = true;
-    return;
-  }
-
-  _captchaState = { ...res, tabId: tab.id };
-
-  if (!res.ok) {
-    const reasons = {
-      no_user: "Chưa login Ticketbox",
-      no_showing: "Mở trang event hoặc booking",
-      no_event: "Mở trang event Ticketbox",
-      api_empty: "Event chưa có showing",
-      solver_missing: "Content script chưa load (reload trang TB)",
-      token_mgr_missing: "Token manager chưa load",
-    };
-    statusEl.innerHTML = `<span class="no-token">🧩 ${reasons[res.reason] || res.reason || "lỗi"}</span>`;
-    metaEl.textContent = res.hint || "";
-    btn.disabled = true;
-    return;
-  }
-
-  if (res.hasToken && res.remainingMs > 0) {
-    statusEl.innerHTML = `<span class="has-token">🧩 Còn ${_fmtRemaining(res.remainingMs)}</span>`;
-    metaEl.textContent = `Showing ${res.showingId} · token valid`;
-    btn.disabled = true;
-    btn.textContent = "OK";
-  } else {
-    statusEl.innerHTML = `<span class="no-token">🧩 Chưa có captcha</span>`;
-    metaEl.textContent = `Showing ${res.showingId}`;
-    btn.disabled = false;
-    btn.textContent = "Giải";
-  }
-}
-
-async function startSolve() {
-  const btn = document.getElementById("btn-captcha");
-  if (!_captchaState || !_captchaState.ok || _captchaState.hasToken) return;
-  btn.disabled = true;
-  btn.textContent = "Đang load...";
-  addLog("🧩 Gọi /capt/gen...");
-
-  const res = await _sendToTabAsync(_captchaState.tabId,
-    { type: "TB_CAPTCHA_GEN", showingId: _captchaState.showingId }, 10000);
-
-  if (!res || !res.ok) {
-    const detail = res ? JSON.stringify(res).slice(0, 200) : "timeout";
-    addLog(`❌ Gen fail: ${detail}`);
-    btn.disabled = false;
-    btn.textContent = "Giải";
-    return;
-  }
-
-  const captchaType = res.data.type; // "rotate" | "slide"
-  addLog(`🧩 Captcha type=${captchaType}`);
-
-  // Hiển thị overlay để user tự kéo/xoay
-  _solveCtx = {
-    tabId: _captchaState.tabId,
-    showingId: _captchaState.showingId,
-    key: res.data.key,
-    type: captchaType,
-    tile_y: res.data.tile_y ?? 0,
-    tile_x: res.data.tile_x ?? 0,
-    tile_width: res.data.tile_width ?? 68,
-    tile_height: res.data.tile_height ?? 68,
-    angle: 0,
-  };
-  _showSolveOverlay(res.data);
-  btn.textContent = "Giải";
-}
-
-function _showSolveOverlay(data) {
-  const overlay = document.getElementById("solve-overlay");
-  const img = document.getElementById("solve-img");
-  const thumb = document.getElementById("solve-thumb");
-  const slider = document.getElementById("solve-slider");
-  const aim = document.getElementById("solve-aim");
-  const meta = document.getElementById("solve-meta");
-  const wrap = document.getElementById("solve-img-wrap");
-
-  const captchaType = _solveCtx?.type || "slide";
-  const _normalize = src => src.startsWith("data:") ? src : `data:image/jpeg;base64,${src}`;
-
-  if (captchaType === "rotate") {
-    // Rotate: slider = 0–360°, thumb xoay theo góc
-    img.onload = () => {
-      const dispW = wrap.clientWidth || 280;
-      slider.min = 0;
-      slider.max = 360;
-      slider.value = 180; // start giữa
-      _solveCtx.angle = 180;
-      if (data.thumb) {
-        thumb.style.display = "block";
-        // Căn giữa thumb trên master
-        thumb.style.left = "50%";
-        thumb.style.top = "50%";
-        thumb.style.transform = `translate(-50%, -50%) rotate(${slider.value}deg)`;
-        thumb.style.width = `${dispW * 0.35}px`;
-        thumb.style.height = `${dispW * 0.35}px`;
-        thumb.style.borderRadius = "50%";
-      }
-      aim.style.display = "none";
-      meta.textContent = `Xoay: ${slider.value}° — kéo để khớp ảnh nhỏ với lỗ`;
-    };
-
-    slider.oninput = () => {
-      const angle = parseInt(slider.value);
-      _solveCtx.angle = angle;
-      if (thumb.style.display !== "none") {
-        thumb.style.transform = `translate(-50%, -50%) rotate(${angle}deg)`;
-      }
-      meta.textContent = `Xoay: ${angle}°`;
-    };
-
-  } else {
-    // Slide captcha (cũ)
-    const tileX = _solveCtx.tile_x || 0;
-    const tileY = _solveCtx.tile_y || 0;
-    const tileW = _solveCtx.tile_width || 68;
-
-    img.onload = () => {
-      const natW = img.naturalWidth || 300;
-      const natH = img.naturalHeight || 160;
-      const dispW = wrap.clientWidth || 280;
-      const scale = dispW / natW;
-      _solveCtx.naturalWidth = natW;
-      _solveCtx.scale = scale;
-      slider.min = 0;
-      slider.max = Math.max(0, natW - tileW);
-      slider.value = tileX;
-      const startDispX = tileX * scale;
-      aim.style.left = `${startDispX + tileW * scale / 2}px`;
-      aim.style.display = "";
-      if (data.thumb) {
-        thumb.style.display = "block";
-        thumb.style.borderRadius = "0";
-        thumb.style.transform = "";
-        thumb.style.left = `${startDispX}px`;
-        thumb.style.top = `${tileY * scale}px`;
-        thumb.style.width = `${tileW * scale}px`;
-        thumb.style.height = `${(_solveCtx.tile_height || tileW) * scale}px`;
-      }
-      meta.textContent = `X = ${tileX} → kéo đến vị trí lỗ`;
-    };
-
-    slider.oninput = () => {
-      const v = parseInt(slider.value);
-      const scale = _solveCtx.scale || 1;
-      const dispX = v * scale;
-      aim.style.left = `${dispX + tileW * scale / 2}px`;
-      if (data.thumb) thumb.style.left = `${dispX}px`;
-      meta.textContent = `X = ${v} / ${_solveCtx.naturalWidth || "?"}`;
-    };
-  }
-
-  img.src = _normalize(data.image);
-  if (data.thumb) thumb.src = _normalize(data.thumb);
-  else thumb.style.display = "none";
-
-  overlay.classList.add("open");
-  document.getElementById("btn-confirm").disabled = false;
-}
-
-function _hideSolveOverlay() {
-  document.getElementById("solve-overlay").classList.remove("open");
-  _solveCtx = null;
-}
-
-async function confirmSolve() {
-  if (!_solveCtx) return;
-  const slider = document.getElementById("solve-slider");
-  const confirmBtn = document.getElementById("btn-confirm");
-  confirmBtn.disabled = true;
-  confirmBtn.textContent = "Đang verify...";
-
-  // Rotate: value = góc (0–360), Slide: value = "x,y"
-  let value;
-  if (_solveCtx.type === "rotate") {
-    value = String(_solveCtx.angle ?? parseInt(slider.value));
-  } else {
-    const x = parseInt(slider.value);
-    const y = _solveCtx.tile_y ?? 0;
-    value = `${x},${y}`;
-  }
-
-  const res = await _sendToTabAsync(_solveCtx.tabId, {
-    type: "TB_CAPTCHA_CHECK",
-    showingId: _solveCtx.showingId,
-    key: _solveCtx.key,
-    value,
-  }, 10000);
-
-  confirmBtn.textContent = "Xác nhận";
-  confirmBtn.disabled = false;
-
-  if (!res || !res.ok) {
-    addLog(`❌ Captcha sai: ${res?.message || res?.reason || "timeout"} — thử lại`);
-    return;
-  }
-
-  addLog(`✅ Captcha OK — TTL ${_fmtRemaining(res.remainingMs)}`);
-  _hideSolveOverlay();
-  await refreshCaptchaStatus();
-}
-
-function initCaptchaUI() {
-  const btn = document.getElementById("btn-captcha");
-  if (btn) btn.addEventListener("click", startSolve);
-  const cancel = document.getElementById("btn-cancel");
-  if (cancel) cancel.addEventListener("click", _hideSolveOverlay);
-  const confirm = document.getElementById("btn-confirm");
-  if (confirm) confirm.addEventListener("click", confirmSolve);
-
-  // Queue status display — lắng nghe event từ content script qua background
+  // Queue status
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "SVP_QUEUE_UPDATE") {
       const queueEl = document.getElementById("queue-status");
@@ -456,10 +306,144 @@ function initCaptchaUI() {
       }
     }
   });
+}
 
-  refreshCaptchaStatus();
-  // Refresh status mỗi 5s
-  _statusInterval = setInterval(refreshCaptchaStatus, 5000);
+async function pollSeatAvailability() {
+  const zones = await _get1ZoneSeatData();
+  renderSeatList(zones);
+}
+
+function _overlayInjectFn() {
+  if (window.__svpOverlayRunning) return;
+  window.__svpOverlayRunning = true;
+
+  const overlayRoot = document.createElement('div');
+  overlayRoot.id = '__svp_overlay__';
+  overlayRoot.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9999';
+  document.body.appendChild(overlayRoot);
+
+  async function fetchZones(eventId, calendarId) {
+    // Dùng /zones API — trả về số thật hơn /get-summary-event
+    const res = await fetch(
+      'https://prod.1zone.vn/ticketing/api/v4/ticket-summary/get-summary-event/' + eventId + '/zones?calendarId=' + calendarId,
+      { credentials: 'include', headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(5000) }
+    );
+    const json = await res.json();
+    // Map ticketClassId → tổng số vé còn
+    const map = {};
+    for (const z of (json.data || [])) {
+      const tcId = z.ticketClassId;
+      if (!tcId) continue;
+      if (!(tcId in map)) map[tcId] = 0;
+      map[tcId] += z.countTicketsAvailable ?? 0;
+    }
+    return map;
+  }
+
+  function render(zoneMap) {
+    const stage = window.Konva?.stages?.[0];
+    if (!stage) return;
+    const canvas = document.querySelector('.konvajs-content canvas');
+    if (!canvas) return;
+    const cr = canvas.getBoundingClientRect();
+    overlayRoot.innerHTML = '';
+    stage.find('Path').forEach(p => {
+      const tcId = p.attrs?.ticketClassId;
+      if (tcId == null || !(tcId in zoneMap)) return;
+      const r = p.getClientRect({ skipShadow: true });
+      if (!r || r.width < 5) return;
+      const cx = cr.left + r.x + r.width / 2;
+      const cy = cr.top + r.y + r.height / 2;
+      const available = zoneMap[tcId];
+      const soldout = available === 0;
+      const el = document.createElement('div');
+      el.style.cssText = 'position:fixed;pointer-events:none;transform:translate(-50%,-50%);' +
+        'background:rgba(0,0,0,0.82);border-radius:5px;padding:3px 8px;white-space:nowrap;' +
+        'font-size:12px;font-weight:800;font-family:sans-serif;' +
+        'color:' + (soldout ? '#ef4444' : '#22c55e') + ';' +
+        'left:' + cx + 'px;top:' + cy + 'px;';
+      el.textContent = soldout ? 'Hết' : 'Còn';
+      overlayRoot.appendChild(el);
+    });
+  }
+
+  async function loop() {
+    const el = document.querySelector('[id^="seatmap-container-"]');
+    const m = el?.id?.match(/seatmap-container-(\w+)/);
+    const calM = location.href.match(/calendarId=([^&]+)/);
+    const eventId = m?.[1], calendarId = calM?.[1];
+    if (!eventId || !calendarId) { if (window.__svpOverlayRunning) setTimeout(loop, 2000); return; }
+
+    try {
+      const zoneMap = await fetchZones(eventId, calendarId);
+      render(zoneMap);
+    } catch(e) {}
+
+    if (window.__svpOverlayRunning) setTimeout(loop, 3000);
+  }
+
+  window.__svpOverlayStop = () => {
+    window.__svpOverlayRunning = false;
+    document.getElementById('__svp_overlay__')?.remove();
+  };
+
+  loop();
+}
+
+function _overlayStopFn() {
+  if (typeof window.__svpOverlayStop === 'function') window.__svpOverlayStop();
+  else { window.__svpOverlayRunning = false; document.getElementById('__svp_overlay__')?.remove(); }
+}
+
+let _overlayOn = false;
+
+async function _getActiveOrFirstTab(urlPatterns) {
+  const allTabs = await chrome.tabs.query({ url: urlPatterns });
+  if (!allTabs.length) return null;
+  const active = allTabs.find(t => t.active);
+  return active || allTabs[0];
+}
+
+async function toggleOverlay() {
+  const btn = document.getElementById("btn-overlay-toggle");
+  const tab = await _getActiveOrFirstTab(["https://ticket.1zone.vn/*"]);
+
+  if (!tab) {
+    addLog("❌ Không tìm thấy tab 1Zone");
+    return;
+  }
+
+  _overlayOn = !_overlayOn;
+  await chrome.storage.local.set({ svp_overlay_on: _overlayOn });
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: _overlayOn ? _overlayInjectFn : _overlayStopFn,
+      world: "MAIN",
+    });
+    addLog(_overlayOn ? "👁 Overlay bật" : "👁 Overlay tắt");
+  } catch(e) {
+    addLog(`❌ Inject lỗi: ${e.message}`);
+    _overlayOn = !_overlayOn; // rollback
+  }
+
+  _updateOverlayBtn(btn);
+}
+
+function _updateOverlayBtn(btn) {
+  if (!btn) return;
+  if (_overlayOn) {
+    btn.style.background = "#14532d";
+    btn.style.color = "#22c55e";
+    btn.style.borderColor = "#166534";
+    btn.title = "Tắt overlay trên seatmap";
+  } else {
+    btn.style.background = "#1e293b";
+    btn.style.color = "#64748b";
+    btn.style.borderColor = "#334155";
+    btn.title = "Bật overlay trên seatmap";
+  }
 }
 
 // Clock: sync 1 lần khi mở popup + tick mỗi 100ms
