@@ -9,10 +9,26 @@ import threading
 import logging
 import http.client
 import webbrowser
+import base64
+import io
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 import customtkinter as ctk
+
+# ── Captcha solver imports (optional — graceful fallback nếu chưa cài) ────────
+try:
+    import numpy as np
+    import cv2
+    _CV2_AVAILABLE = True
+except ImportError:
+    _CV2_AVAILABLE = False
+
+try:
+    from PIL import Image
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
 
 # ── Path handling (frozen .exe vs source .py) ────────────────────────────────
 
@@ -61,7 +77,8 @@ def _gen_api_token():
 API_TOKEN = _gen_api_token()  # NEW token mỗi lần app start
 
 # Endpoints không cần auth (chỉ handshake để extension lấy token lần đầu)
-_PUBLIC_ENDPOINTS = {"/handshake", "/ping"}
+# /solve public vì captcha solver gọi trực tiếp từ content script, không có token
+_PUBLIC_ENDPOINTS = {"/handshake", "/ping", "/solve"}
 
 # ── Mode label mapping (UI tiếng Việt ↔ internal key) ────────────────────────
 MODE_LABEL_ZONE = "Chọn zone (khu)"
@@ -134,20 +151,29 @@ def _time_sync_loop():
 def _now_synced_ms():
     return time.time() + _time_offset_sec
 
-DEFAULT_CONFIG = {
-    "name": "", "phone": "", "email": "", "address": "",
-    "auto_seat": {
-        "platform": "1Zone",
+def _default_seat_cfg():
+    return {
         "seat_mode": "seat_zone",
         "zone_priority": [],
         "seat_map_priorities": [],  # [{zone, row, seat_range, parity}]
         "quantity": 1,
         "require_adjacent": True,
         "allow_split_seats": False,
-        "allow_partial": False,  # NEW: nếu true, chấp nhận pick < quantity vẫn proceed
+        "allow_partial": False,
         "enabled": False,
     }
+
+DEFAULT_CONFIG = {
+    "name": "", "phone": "", "email": "", "address": "",
+    "active_platform": "1Zone",  # tab nào đang được chọn hiển thị cuối cùng trên UI
+    "auto_seat": {
+        "1zone": _default_seat_cfg(),
+        "ticketbox": _default_seat_cfg(),
+        "ctiket": _default_seat_cfg(),
+    },
 }
+
+_PLATFORM_KEY_MAP = {"1Zone": "1zone", "Ticketbox": "ticketbox", "Ctiket": "ctiket"}
 
 # ── Config helpers ────────────────────────────────────────────────────────────
 
@@ -155,15 +181,37 @@ def load_config():
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-        for k, v in DEFAULT_CONFIG.items():
-            if k not in cfg:
-                cfg[k] = v
-        for k, v in DEFAULT_CONFIG["auto_seat"].items():
-            if k not in cfg.get("auto_seat", {}):
-                cfg.setdefault("auto_seat", {})[k] = v
-        return cfg
     except Exception:
-        return dict(DEFAULT_CONFIG)
+        return json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+
+    for k, v in DEFAULT_CONFIG.items():
+        if k not in cfg:
+            cfg[k] = v if not isinstance(v, dict) else json.loads(json.dumps(v))
+
+    # Migrate config cũ: auto_seat là 1 dict chung (có "platform" + "zone_priority" trực tiếp)
+    # → chuyển thành map theo platform, giữ lại đúng platform đang dùng trước đó.
+    old_as = cfg.get("auto_seat", {})
+    if "platform" in old_as or "zone_priority" in old_as:
+        old_platform = old_as.get("platform", "1Zone")
+        old_key = _PLATFORM_KEY_MAP.get(old_platform, "1zone")
+        new_as = {
+            "1zone": _default_seat_cfg(),
+            "ticketbox": _default_seat_cfg(),
+            "ctiket": _default_seat_cfg(),
+        }
+        for k in new_as[old_key]:
+            if k in old_as:
+                new_as[old_key][k] = old_as[k]
+        cfg["auto_seat"] = new_as
+        cfg["active_platform"] = old_platform
+
+    # Đảm bảo đủ field cho cả 3 platform (phòng trường hợp thêm field mới sau này)
+    for pk in ("1zone", "ticketbox", "ctiket"):
+        cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
+        for k, v in _default_seat_cfg().items():
+            cfg["auto_seat"][pk].setdefault(k, v)
+
+    return cfg
 
 def save_config(cfg):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -252,6 +300,9 @@ class _Handler(BaseHTTPRequestHandler):
                     "loggedIn": None,
                     "turnstilePoolSize": 0,
                 },
+                "ctiket": {
+                    "loggedIn": None,
+                },
                 "commandQueueSize": len(_command_queue),
             })
         elif self.path == "/command":
@@ -319,6 +370,10 @@ class _Handler(BaseHTTPRequestHandler):
             if _app_ref:
                 _app_ref.after(0, _app_ref.load_config_to_ui)
             self._send_json(200, {"ok": True})
+        elif self.path == "/solve":
+            # Captcha solver endpoint — được gọi bởi puzzle-solver.js + rotation-solver.js
+            result = _solve_captcha(data)
+            self._send_json(200 if result.get("ok") else 500, result)
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -357,6 +412,147 @@ class _Handler(BaseHTTPRequestHandler):
             }
             if _app_ref:
                 _app_ref.after(0, _app_ref.update_tokens_card)
+
+# ── Captcha Solver (OpenCV) ───────────────────────────────────────────────────
+
+def _b64_to_cv2(b64_str):
+    """Decode base64 data URL hoặc chuỗi base64 thuần → numpy array.
+    Dùng IMREAD_UNCHANGED để giữ nguyên kênh Alpha (quan trọng cho puzzle slice).
+    """
+    try:
+        if "base64," in b64_str:
+            b64_str = b64_str.split("base64,")[1]
+        elif "," in b64_str:
+            b64_str = b64_str.split(",", 1)[1]
+        img_bytes = base64.b64decode(b64_str)
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        return cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+    except Exception as e:
+        logger.error(f"[CAPTCHA] Lỗi decode base64: {e}")
+        return None
+
+def _solve_puzzle(bg_b64, slice_b64):
+    """
+    Giải captcha mảnh ghép (puzzle slider).
+    Dùng kênh Alpha của slice để tạo edge map chính xác hơn.
+    Trả về x pixel cần kéo tính theo kích thước ảnh gốc (naturalWidth).
+    """
+    bg    = _b64_to_cv2(bg_b64)
+    piece = _b64_to_cv2(slice_b64)
+
+    if bg is None or piece is None:
+        return {"ok": False, "error": "decode ảnh thất bại"}
+
+    # Xử lý ảnh nền
+    if len(bg.shape) == 3 and bg.shape[2] == 4:
+        bg_gray = cv2.cvtColor(bg[:, :, :3], cv2.COLOR_BGR2GRAY)
+    else:
+        bg_gray = cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY)
+    bg_blur  = cv2.GaussianBlur(bg_gray, (3, 3), 0)
+    bg_edges = cv2.Canny(bg_blur, 100, 200)
+
+    # Xử lý mảnh ghép — ưu tiên kênh Alpha để bóc tách hình dáng chính xác
+    if len(piece.shape) == 3 and piece.shape[2] == 4:
+        slice_edges = cv2.Canny(piece[:, :, 3], 100, 200)
+    else:
+        slice_gray  = cv2.cvtColor(piece, cv2.COLOR_BGR2GRAY)
+        slice_blur  = cv2.GaussianBlur(slice_gray, (3, 3), 0)
+        slice_edges = cv2.Canny(slice_blur, 100, 200)
+
+    # Template matching
+    result = cv2.matchTemplate(bg_edges, slice_edges, cv2.TM_CCOEFF_NORMED)
+
+    # Bảo vệ chống lỗi rìa trái (x=0 thường là false positive)
+    if result.shape[1] > 25:
+        result[:, :25] = -1
+
+    _, _, _, max_loc = cv2.minMaxLoc(result)
+    x = int(max_loc[0])
+    return {"ok": True, "x": x}
+
+def _solve_rotation(images_b64):
+    """
+    Giải captcha xoay tròn (Ticketbox style).
+    Thuật toán Linear Polar Warp: biến đổi hệ tọa độ cực giúp chuyển
+    chuyển động xoay tròn thành dịch chuyển tịnh tiến theo chiều dọc,
+    sau đó dùng template matching để tìm độ lệch góc.
+    """
+    if len(images_b64) < 2:
+        return {"ok": False, "error": "cần ít nhất 2 ảnh (bg + fg)"}
+
+    img_bg     = _b64_to_cv2(images_b64[0])
+    img_target = _b64_to_cv2(images_b64[1])
+
+    if img_bg is None or img_target is None:
+        return {"ok": False, "error": "decode ảnh thất bại"}
+
+    # Chuyển sang grayscale, xử lý cả ảnh có kênh Alpha
+    def to_gray(img):
+        if len(img.shape) == 3 and img.shape[2] == 4:
+            return cv2.cvtColor(img[:, :, :3], cv2.COLOR_BGR2GRAY)
+        return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    gray_bg     = to_gray(img_bg)
+    gray_target = to_gray(img_target)
+
+    # Đồng bộ kích thước
+    h, w = gray_bg.shape[:2]
+    gray_target = cv2.resize(gray_target, (w, h))
+
+    # Xác định tâm và bán kính quét cực tối đa
+    center     = (w // 2, h // 2)
+    max_radius = min(w, h) // 2
+
+    # Warp Polar: biến hình tròn → dải hình chữ nhật phẳng
+    # Góc xoay (0-360°) → tọa độ Y trên ảnh kết quả
+    flags      = cv2.WARP_POLAR_LINEAR + cv2.INTER_LINEAR
+    polar_bg     = cv2.warpPolar(gray_bg,     (w, h), center, max_radius, flags)
+    polar_target = cv2.warpPolar(gray_target, (w, h), center, max_radius, flags)
+
+    # Nhân đôi ảnh nền theo chiều dọc để xử lý trường hợp góc vượt biên chu kỳ
+    polar_bg_ext = np.vstack([polar_bg, polar_bg])
+
+    # Template matching tìm độ dịch chuyển theo trục Y
+    res = cv2.matchTemplate(polar_bg_ext, polar_target, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(res)
+
+    y_offset = max_loc[1]
+
+    # Quy đổi pixel dịch chuyển dọc → góc độ (h pixel = 360°)
+    angle = (y_offset / h) * 360
+    angle = int(angle % 360)
+
+    logger.info(f"[CAPTCHA/rotation] angle={angle}° y_offset={y_offset} score={max_val:.4f}")
+    return {"ok": True, "angle": angle}
+
+def _solve_captcha(data):
+    """Router chính — phân loại puzzle vs rotation rồi dispatch."""
+    if not _CV2_AVAILABLE:
+        return {"ok": False, "error": "opencv-python chưa được cài. Chạy: pip install opencv-python numpy"}
+
+    captcha_type = str(data.get("type", "")).lower()
+
+    try:
+        if captcha_type == "puzzle":
+            bg    = data.get("bg", "")
+            slice_ = data.get("slice", "")
+            if not bg or not slice_:
+                return {"ok": False, "error": "thiếu trường 'bg' hoặc 'slice'"}
+            return _solve_puzzle(bg, slice_)
+
+        elif captcha_type == "rotation":
+            images = data.get("images", [])
+            if not images:
+                return {"ok": False, "error": "thiếu trường 'images'"}
+            return _solve_rotation(images)
+
+        else:
+            return {"ok": False, "error": f"type không hợp lệ: '{captcha_type}' (dùng 'puzzle' hoặc 'rotation')"}
+
+    except Exception as e:
+        logger.error(f"[CAPTCHA] Lỗi solve: {e}")
+        return {"ok": False, "error": str(e)}
+
 
 def start_api_server():
     server = HTTPServer(("127.0.0.1", API_PORT), _Handler)
@@ -835,18 +1031,35 @@ class App(ctk.CTk):
         f.grid_columnconfigure(0, weight=1)
         self._tab_seat_frame = f
 
-        # Platform
+        # Platform — dạng tab bấm (segmented), thay cho dropdown cũ
         ctk.CTkLabel(f, text="Nền tảng", font=("Arial", 11), text_color=C_MUTED
                      ).grid(row=0, column=0, padx=16, pady=(14,0), sticky="w")
-        self.sel_platform = ctk.CTkOptionMenu(
-            f, values=["1Zone", "Ticketbox"],
-            command=self._on_mode_change, font=("Arial", 12)
-        )
-        self.sel_platform.grid(row=1, column=0, padx=16, pady=(2,8), sticky="ew")
+        self._platform_tab_frame = ctk.CTkFrame(f, fg_color="transparent")
+        self._platform_tab_frame.grid(row=1, column=0, padx=16, pady=(2,8), sticky="ew")
+        self._platform_tab_frame.grid_columnconfigure((0,1,2), weight=1)
+
+        self._platform_value = "1Zone"
+        self._platform_buttons = {}
+        for i, p in enumerate(["1Zone", "Ticketbox", "Ctiket"]):
+            btn = ctk.CTkButton(
+                self._platform_tab_frame, text=p, font=("Arial", 12, "bold"),
+                corner_radius=6, height=32,
+                command=lambda p=p: self._select_platform_tab(p),
+            )
+            btn.grid(row=0, column=i, padx=(0 if i == 0 else 4, 0), sticky="ew")
+            self._platform_buttons[p] = btn
+        self._style_platform_tabs()
+
+        # sel_platform giả lập API .get()/.set() để tương thích code cũ không cần sửa thêm
+        class _FakePlatformVar:
+            def __init__(self, outer): self._outer = outer
+            def get(self): return self._outer._platform_value
+            def set(self, val): self._outer._select_platform_tab(val, _save_prev=False)
+        self.sel_platform = _FakePlatformVar(self)
 
         # Mode — display tiếng Việt, internal value vẫn seat_zone/seat_map
-        ctk.CTkLabel(f, text="Kiểu chọn ghế", font=("Arial", 11), text_color=C_MUTED
-                     ).grid(row=2, column=0, padx=16, pady=(0,0), sticky="w")
+        self.lbl_mode = ctk.CTkLabel(f, text="Kiểu chọn ghế", font=("Arial", 11), text_color=C_MUTED)
+        self.lbl_mode.grid(row=2, column=0, padx=16, pady=(0,0), sticky="w")
         self.sel_mode = ctk.CTkOptionMenu(
             f, values=[MODE_LABEL_ZONE, MODE_LABEL_MAP],
             command=self._on_mode_change, font=("Arial", 12)
@@ -938,6 +1151,110 @@ class App(ctk.CTk):
             if isinstance(w, SeatMapRow)
         ]
 
+    def _on_platform_change(self, new_platform=None):
+        # new_platform có thể là string (do OptionMenu command truyền), hoặc None (gọi nội bộ)
+        prev_platform = getattr(self, "_prev_platform", None)
+
+        # Lưu config của platform trước đó (nếu đang có data + đã init xong UI)
+        if prev_platform and prev_platform != self.sel_platform.get() and getattr(self, "_ui_ready", False):
+            self._save_seat_config_for(prev_platform)
+
+        self._prev_platform = self.sel_platform.get()
+
+        platform = self.sel_platform.get()
+        if platform == "Ctiket":
+            # Ctiket chỉ có seat_zone (GA theo khu, không có seatmap ghế cụ thể)
+            # → ẩn dropdown mode, ép luôn về seat_zone
+            self.sel_mode.set(MODE_LABEL_ZONE)
+            self.lbl_mode.grid_remove()
+            self.sel_mode.grid_remove()
+        else:
+            self.lbl_mode.grid()
+            self.sel_mode.grid()
+
+        self._load_seat_config_for(platform)
+
+    def _save_seat_config_for(self, platform):
+        """Lưu phần auto_seat[platform] hiện tại trên UI vào self._cfg (chưa ghi file)."""
+        pk = _PLATFORM_KEY_MAP.get(platform, "1zone")
+        mode = "seat_zone" if platform == "Ctiket" else _label_to_mode(self.sel_mode.get())
+        try:
+            qty = int(self.inp_qty.get().strip())
+        except Exception:
+            qty = 1
+
+        seat_cfg = self._cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
+        seat_cfg["seat_mode"]     = mode
+        seat_cfg["quantity"]      = qty
+        seat_cfg["allow_partial"] = self.var_allow_partial.get()
+        seat_cfg["enabled"]       = self.var_enabled.get()
+
+        if mode == "seat_zone":
+            zones = [z.strip() for z in self.txt_priority.get("1.0", "end").splitlines() if z.strip()]
+            seat_cfg["zone_priority"]    = zones
+            seat_cfg["priority_targets"] = zones
+            seat_cfg["seat_map_priorities"] = []
+        else:
+            self._refresh_seat_rows()
+            priorities = [r.get_value() for r in self._seat_map_rows if r.get_value()]
+            seat_cfg["seat_map_priorities"] = priorities
+            seat_cfg["zone_priority"]        = priorities
+            seat_cfg["priority_targets"]     = priorities
+
+    def _load_seat_config_for(self, platform):
+        """Đọc auto_seat[platform] từ self._cfg, render lên UI."""
+        pk = _PLATFORM_KEY_MAP.get(platform, "1zone")
+        as_ = self._cfg.get("auto_seat", {}).get(pk, _default_seat_cfg())
+
+        mode = as_.get("seat_mode", "seat_zone")
+        self.sel_mode.set(_mode_to_label(mode))
+
+        if mode == "seat_zone":
+            self._build_dynamic_zone()
+            zones = as_.get("zone_priority") or as_.get("priority_targets") or []
+            self.txt_priority.delete("1.0", "end")
+            self.txt_priority.insert("1.0", "\n".join(zones))
+        else:
+            self._build_dynamic_map()
+            priorities = as_.get("seat_map_priorities") or []
+            for w in self.seat_rows_frame.winfo_children():
+                w.destroy()
+            self._seat_map_rows = []
+            if priorities:
+                for p in priorities:
+                    self._add_seat_map_row(p)
+            else:
+                self._add_seat_map_row()
+
+        _set(self.inp_qty, str(as_.get("quantity", 1)))
+        self.var_allow_partial.set(bool(as_.get("allow_partial", False)))
+        self.var_enabled.set(bool(as_.get("enabled", False)))
+
+    def _style_platform_tabs(self):
+        for p, btn in self._platform_buttons.items():
+            if p == self._platform_value:
+                btn.configure(fg_color="#1e3a5f", text_color="#93c5fd", hover_color="#274a73")
+            else:
+                btn.configure(fg_color="#1e293b", text_color="#64748b", hover_color="#273548")
+
+    def _select_platform_tab(self, platform, _save_prev=True):
+        prev_platform = self._platform_value
+        if _save_prev and prev_platform != platform and getattr(self, "_ui_ready", False):
+            self._save_seat_config_for(prev_platform)
+
+        self._platform_value = platform
+        self._prev_platform = platform
+        self._style_platform_tabs()
+
+        if platform == "Ctiket":
+            self.lbl_mode.grid_remove()
+            self.sel_mode.grid_remove()
+        else:
+            self.lbl_mode.grid()
+            self.sel_mode.grid()
+
+        self._load_seat_config_for(platform)
+
     def _on_mode_change(self, _=None):
         mode = _label_to_mode(self.sel_mode.get())
         if mode == "seat_zone":
@@ -989,32 +1306,16 @@ class App(ctk.CTk):
         _set(self.inp_email, cfg.get("email", ""))
         _set(self.inp_address, cfg.get("address", ""))
 
-        as_ = cfg.get("auto_seat", {})
-        self.sel_platform.set(as_.get("platform", "1Zone"))
-        # Map internal seat_zone/seat_map → label tiếng Việt
-        self.sel_mode.set(_mode_to_label(as_.get("seat_mode", "seat_zone")))
-        self._on_mode_change()
+        platform = cfg.get("active_platform", "1Zone")
+        self.sel_platform.set(platform)
+        self._prev_platform = platform
 
-        mode = as_.get("seat_mode", "seat_zone")
-        if mode == "seat_zone":
-            zones = as_.get("zone_priority") or as_.get("priority_targets") or []
-            self.txt_priority.delete("1.0", "end")
-            self.txt_priority.insert("1.0", "\n".join(zones))
-        else:
-            priorities = as_.get("seat_map_priorities") or []
-            # Clear rows cũ
-            for w in self.seat_rows_frame.winfo_children():
-                w.destroy()
-            self._seat_map_rows = []
-            if priorities:
-                for p in priorities:
-                    self._add_seat_map_row(p)
-            else:
-                self._add_seat_map_row()
+        if platform == "Ctiket":
+            self.lbl_mode.grid_remove()
+            self.sel_mode.grid_remove()
+        self._load_seat_config_for(platform)
 
-        _set(self.inp_qty, str(as_.get("quantity", 1)))
-        self.var_allow_partial.set(bool(as_.get("allow_partial", False)))
-        self.var_enabled.set(bool(as_.get("enabled", False)))
+        self._ui_ready = True  # từ giờ _on_platform_change mới được phép auto-save platform cũ
         self._update_status()
 
     def _save_config(self):
@@ -1025,33 +1326,36 @@ class App(ctk.CTk):
         cfg["address"] = self.inp_address.get().strip()
 
         # Convert label → internal mode key
-        mode = _label_to_mode(self.sel_mode.get())
+        platform = self.sel_platform.get()
+        cfg["active_platform"] = platform
+        pk = _PLATFORM_KEY_MAP.get(platform, "1zone")
+        mode = "seat_zone" if platform == "Ctiket" else _label_to_mode(self.sel_mode.get())
         try:
             qty = int(self.inp_qty.get().strip())
         except Exception:
             qty = 1
 
-        cfg["auto_seat"]["platform"]      = self.sel_platform.get()
-        cfg["auto_seat"]["seat_mode"]     = mode
-        cfg["auto_seat"]["quantity"]      = qty
-        cfg["auto_seat"]["allow_partial"] = self.var_allow_partial.get()
-        cfg["auto_seat"]["enabled"]       = self.var_enabled.get()
+        seat_cfg = cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
+        seat_cfg["seat_mode"]     = mode
+        seat_cfg["quantity"]      = qty
+        seat_cfg["allow_partial"] = self.var_allow_partial.get()
+        seat_cfg["enabled"]       = self.var_enabled.get()
 
         if mode == "seat_zone":
             zones = [z.strip() for z in self.txt_priority.get("1.0", "end").splitlines() if z.strip()]
-            cfg["auto_seat"]["zone_priority"]    = zones
-            cfg["auto_seat"]["priority_targets"] = zones
-            cfg["auto_seat"]["seat_map_priorities"] = []
+            seat_cfg["zone_priority"]    = zones
+            seat_cfg["priority_targets"] = zones
+            seat_cfg["seat_map_priorities"] = []
         else:
             self._refresh_seat_rows()
             priorities = [r.get_value() for r in self._seat_map_rows if r.get_value()]
-            cfg["auto_seat"]["seat_map_priorities"] = priorities
-            cfg["auto_seat"]["zone_priority"]        = priorities
-            cfg["auto_seat"]["priority_targets"]     = priorities
+            seat_cfg["seat_map_priorities"] = priorities
+            seat_cfg["zone_priority"]        = priorities
+            seat_cfg["priority_targets"]     = priorities
 
         save_config(cfg)
         self._cfg = cfg
-        self.add_log("💾 Đã lưu config.", "green")
+        self.add_log(f"💾 Đã lưu config cho {platform}.", "green")
 
     def _on_toggle_bot(self):
         self._save_config()
