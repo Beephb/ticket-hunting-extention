@@ -84,12 +84,14 @@ function extract1ZZoneInfo() {
 
 // ── Zones API ─────────────────────────────────────────────────────────────────
 
-async function getZonesApi1Z(eventId, calendarId) {
-  // Thử dùng cache từ queue_watcher trước
-  const cached = await loadZonesCacheFrom1Z();
-  if (cached) return cached;
+async function getZonesApi1Z(eventId, calendarId, useCache = true) {
+  // Chỉ dùng cache prequeue ở lần gọi đầu (useCache=true) — khi retry liên tục
+  // (chờ ghế nhả ra) PHẢI fetch mới mỗi lần, không thì mãi đọc snapshot cũ.
+  if (useCache) {
+    const cached = await loadZonesCacheFrom1Z();
+    if (cached) return cached;
+  }
 
-  // Không có cache → fetch bình thường
   const url = `${API_BASE_1Z_ZONE}/v4/ticket-summary/get-summary-event/${eventId}/zones?calendarId=${encodeURIComponent(calendarId)}`;
   const res = await fetch(url, {
     method: "GET",
@@ -532,7 +534,7 @@ async function clickPayAndWait1Z(calendarId) {
 // ── Main flow: 1Zone seat_zone ────────────────────────────────────────────────
 
 async function run1ZoneSeatZone(cfg) {
-  const aseat = cfg.auto_seat || {};
+  const aseat = cfg.auto_seat?.["1zone"] || cfg.auto_seat || {};
   const priorities = (aseat.zone_priority || aseat.priority_targets || []).map(p => String(p).trim()).filter(Boolean);
   const quantity = Math.max(1, parseInt(aseat.quantity) || 1);
   const allowPartial = !!aseat.allow_partial;
@@ -552,11 +554,15 @@ async function run1ZoneSeatZone(cfg) {
     return false;
   }
 
-  // GET zones API (dùng cache nếu có)
-  svpLog("📡 GET zones API...", "blue");
+  // Lần thử đầu tiên của phiên hunt: ưu tiên cache prequeue (nhanh hơn).
+  // Các lần retry sau (chờ ghế nhả ra): LUÔN fetch mới, không dùng cache cũ.
+  const isFirstAttempt = (cfg._seatRetryAttempt ?? 1) <= 1;
+
+  // GET zones API
+  svpLog(isFirstAttempt ? "📡 GET zones API..." : "📡 GET zones API (fresh, bỏ cache)...", "blue");
   let zonesData;
   try {
-    zonesData = await getZonesApi1Z(info.eventId, info.calendarId);
+    zonesData = await getZonesApi1Z(info.eventId, info.calendarId, isFirstAttempt);
   } catch(e) {
     svpLog(`❌ Zones API lỗi: ${e.message}`, "red");
     return false;

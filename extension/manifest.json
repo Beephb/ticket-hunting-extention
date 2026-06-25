@@ -9,7 +9,8 @@
     "tabs",
     "scripting",
     "activeTab",
-    "webNavigation"
+    "webNavigation",
+    "debugger"
   ],
 
   "host_permissions": [
@@ -17,6 +18,7 @@
     "https://queue.1zone.vn/*",
     "https://prod.1zone.vn/*",
     "https://ticketbox.vn/*",
+    "https://cticket.vn/*",
     "http://127.0.0.1:9279/*"
   ],
 

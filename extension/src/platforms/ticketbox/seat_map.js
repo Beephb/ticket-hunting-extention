@@ -546,7 +546,7 @@ async function clickCheckoutButtonTbMap() {
 // ── Main flow: Ticketbox seat_map ─────────────────────────────────────────────
 
 async function runTicketboxSeatMap(cfg) {
-  const aseat = cfg.auto_seat || {};
+  const aseat = cfg.auto_seat?.["ticketbox"] || cfg.auto_seat || {};
   const priorityTargets = aseat.zone_priority || aseat.priority_targets || [];
   const quantity = parseInt(aseat.quantity) || 1;
   const requireAdjacent = aseat.require_adjacent !== false;

@@ -561,7 +561,7 @@ async function clickTbModalContinue() {
 // ── Main flow: Ticketbox seat_zone ────────────────────────────────────────────
 
 async function runTicketboxSeatZone(cfg) {
-  const aseat = cfg.auto_seat || {};
+  const aseat = cfg.auto_seat?.["ticketbox"] || cfg.auto_seat || {};
   const priorityList = aseat.zone_priority || aseat.priority_targets || [];
   const quantity = parseInt(aseat.quantity) || 1;
   const allowPartial = !!aseat.allow_partial;  // NEW

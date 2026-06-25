@@ -439,12 +439,12 @@ async function click1ZonePaymentBtn() {
 // ── Main flow: 1Zone seat_map ─────────────────────────────────────────────────
 
 async function run1ZoneSeatMap(cfg) {
-  const aseat = cfg.auto_seat || {};
+  const aseat = cfg.auto_seat?.["1zone"] || cfg.auto_seat || {};
   const priorities = aseat.zone_priority || aseat.priority_targets || [];
   const quantity = parseInt(aseat.quantity) || 1;
   const requireAdjacent = aseat.require_adjacent !== false;
   const allowSplit = !!aseat.allow_split_seats;
-  const allowPartial = !!aseat.allow_partial;  // NEW: chấp nhận pick < quantity
+  const allowPartial = !!aseat.allow_partial;
 
   svpLog(`🗺️ 1Zone seat_map | priority=${priorities.join(",")} | SL=${quantity}${allowPartial ? " (cho phép mua thiếu)" : ""}`, "blue");
 

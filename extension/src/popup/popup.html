@@ -9,6 +9,22 @@
   .header { background: #111827; padding: 12px 16px 10px; border-bottom: 1px solid #1e293b; }
   .header h1 { font-size: 15px; font-weight: 600; color: #fbbf24; }
   .header .sub { font-size: 11px; color: #64748b; margin-top: 2px; }
+
+  /* ── Main tab bar (Săn Vé / Captcha) ── */
+  .main-tab-bar { display: flex; background: #111827; border-bottom: 1px solid #1e293b; }
+  .main-tab {
+    flex: 1; text-align: center; padding: 8px 4px;
+    font-size: 12px; font-weight: 600; color: #475569;
+    cursor: pointer; border-bottom: 2px solid transparent;
+    transition: color .15s, border-color .15s;
+  }
+  .main-tab.active { color: #fbbf24; border-bottom-color: #fbbf24; }
+  .main-tab:hover:not(.active) { color: #94a3b8; }
+
+  /* ── Tab panels ── */
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
   .body { padding: 12px 14px; }
 
   .status-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
@@ -67,7 +83,7 @@
   }
   .clock-sync { font-size: 9px; color: #64748b; margin-left: 4px; }
 
-  /* Seat dropdown (xổ danh sách ghế) */
+  /* Seat dropdown */
   .seat-dropdown-wrap { position: relative; display: inline-block; }
   .btn-seat-toggle {
     background: #1e293b; color: #94a3b8; border: 1px solid #334155;
@@ -80,16 +96,9 @@
   .btn-seat-toggle.all-available { color: #22c55e; border-color: #14532d; }
 
   .seat-dropdown {
-    display: none;
-    position: absolute;
-    right: 0;
-    top: calc(100% + 4px);
-    background: #111827;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 6px 0;
-    min-width: 180px;
-    z-index: 99999;
+    display: none; position: absolute; right: 0; top: calc(100% + 4px);
+    background: #111827; border: 1px solid #334155; border-radius: 8px;
+    padding: 6px 0; min-width: 180px; z-index: 99999;
     box-shadow: 0 4px 16px rgba(0,0,0,.7);
   }
   .seat-dropdown.open { display: block; }
@@ -107,103 +116,186 @@
   .seat-drop-status.available { color: #22c55e; }
   .seat-drop-status.soldout { color: #ef4444; }
   .seat-drop-empty { font-size: 11px; color: #475569; padding: 4px 12px; }
+  .platform-tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+  .platform-tab { flex: 1; text-align: center; padding: 6px 4px; border-radius: 6px;
+    font-size: 11px; font-weight: 600; background: #111827; color: #475569;
+    border: 1px solid #1e293b; }
+  .platform-tab.active { background: #1e3a5f; color: #93c5fd; border-color: #3b82f6; }
+  .platform-tab.inactive-dim { opacity: .5; }
+
+  /* ── Tab Captcha ── */
+  .captcha-body { padding: 16px 14px; }
+  .captcha-card {
+    background: #111827; border: 1px solid #1e293b; border-radius: 10px;
+    padding: 14px; margin-bottom: 12px;
+  }
+  .captcha-card-title {
+    font-size: 12px; font-weight: 700; color: #fbbf24; margin-bottom: 10px;
+  }
+  .cdp-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 0;
+  }
+  .cdp-info { flex: 1; }
+  .cdp-label { font-size: 13px; font-weight: 600; color: #e2e8f0; }
+  .cdp-desc { font-size: 10px; color: #64748b; margin-top: 3px; line-height: 1.4; }
+  .cdp-status-badge {
+    font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 12px;
+    margin-top: 6px; display: inline-block;
+  }
+  .cdp-status-badge.connected { background: #14532d; color: #86efac; }
+  .cdp-status-badge.disconnected { background: #1e293b; color: #64748b; }
+
+  .captcha-note {
+    background: #0d1117; border: 1px solid #1e293b; border-radius: 8px;
+    padding: 10px 12px; font-size: 10px; color: #64748b; line-height: 1.6;
+  }
+  .captcha-note strong { color: #94a3b8; }
 </style>
 </head>
 <body>
+
 <div class="header">
   <h1>🎫 Săn Vé Pro</h1>
   <div class="sub" id="sub-text">v2.0.0 — Đang kiểm tra App...</div>
 </div>
-<div class="body">
-  <div class="clock-box">
-    <span class="clock-label">🕐 Giờ chính xác</span>
-    <span>
-      <span class="clock-value" id="clock-value">--:--:--.---</span>
-      <span class="clock-sync" id="clock-sync">đang sync...</span>
-    </span>
-  </div>
 
-  <div class="status-row">
-    <div class="dot" id="app-dot"></div>
-    <div class="status-text" id="app-status">Đang kết nối Desktop App...</div>
-  </div>
+<!-- Main tab bar -->
+<div class="main-tab-bar">
+  <div class="main-tab active" id="main-tab-sanve" data-tab="sanve">🎫 Săn Vé</div>
+  <div class="main-tab" id="main-tab-captcha" data-tab="captcha">🤖 Captcha</div>
+</div>
 
-  <div class="toggle-row">
-    <span class="toggle-label">Bot tự động</span>
-    <div style="display:flex;align-items:center;gap:8px;">
-      <!-- Nút xem ghế xổ sang trái -->
-      <div class="seat-dropdown-wrap">
-        <button class="btn-seat-toggle" id="btn-seat-toggle" title="Xem tình trạng ghế">🪑 —</button>
-        <div class="seat-dropdown" id="seat-dropdown">
-          <div class="seat-dropdown-title">TÌNH TRẠNG GHẾ [v10]</div>
-          <div id="seat-drop-list"><div class="seat-drop-empty">Đang tải...</div></div>
+<!-- ── Panel: Săn Vé ── -->
+<div class="tab-panel active" id="panel-sanve">
+  <div class="body">
+    <div class="platform-tabs" id="platform-tabs">
+      <div class="platform-tab" id="tab-1zone" data-platform="1Zone">1Zone</div>
+      <div class="platform-tab" id="tab-ticketbox" data-platform="Ticketbox">Ticketbox</div>
+      <div class="platform-tab" id="tab-ctiket" data-platform="Ctiket">Ctiket</div>
+    </div>
+
+    <div class="clock-box">
+      <span class="clock-label">🕐 Giờ chính xác</span>
+      <span>
+        <span class="clock-value" id="clock-value">--:--:--.---</span>
+        <span class="clock-sync" id="clock-sync">đang sync...</span>
+      </span>
+    </div>
+
+    <div class="status-row">
+      <div class="dot" id="app-dot"></div>
+      <div class="status-text" id="app-status">Đang kết nối Desktop App...</div>
+    </div>
+
+    <div class="toggle-row">
+      <span class="toggle-label">Bot tự động</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div class="seat-dropdown-wrap">
+          <button class="btn-seat-toggle" id="btn-seat-toggle" title="Xem tình trạng ghế">🪑 —</button>
+          <div class="seat-dropdown" id="seat-dropdown">
+            <div class="seat-dropdown-title">TÌNH TRẠNG GHẾ [v10]</div>
+            <div id="seat-drop-list"><div class="seat-drop-empty">Đang tải...</div></div>
+          </div>
         </div>
+        <button id="btn-overlay-toggle" style="
+          background:#1e293b;color:#64748b;border:1px solid #334155;border-radius:6px;
+          font-size:11px;font-weight:600;padding:4px 8px;cursor:pointer;
+          transition:background .15s;white-space:nowrap;" title="Hiện/ẩn overlay trên seatmap">👁</button>
+        <label class="toggle">
+          <input type="checkbox" id="bot-toggle">
+          <span class="slider"></span>
+        </label>
       </div>
-      <!-- Nút overlay trên seatmap -->
-      <button id="btn-overlay-toggle" style="
-        background:#1e293b;color:#64748b;border:1px solid #334155;border-radius:6px;
-        font-size:11px;font-weight:600;padding:4px 8px;cursor:pointer;
-        transition:background .15s;white-space:nowrap;" title="Hiện/ẩn overlay trên seatmap">👁</button>
-      <label class="toggle">
-        <input type="checkbox" id="bot-toggle">
-        <span class="slider"></span>
-      </label>
+    </div>
+    <div id="queue-status" style="font-size:11px;font-weight:600;margin-bottom:8px;min-height:16px;"></div>
+
+    <div class="config-box" id="config-box">
+      <div class="row"><span>Platform</span><span class="val" id="cfg-platform">—</span></div>
+      <div class="row"><span>Mode</span><span class="val" id="cfg-mode">—</span></div>
+      <div class="row"><span>Ưu tiên</span><span class="val" id="cfg-zones">—</span></div>
+      <div class="row"><span>Số lượng</span><span class="val" id="cfg-qty">—</span></div>
+    </div>
+
+    <div class="log-box" id="log-box">Chờ hoạt động...</div>
+
+    <div class="btn-group">
+      <button class="btn btn-auto" id="btn-hunt-auto">
+        <div class="btn-icon">🏹</div>
+        <div class="btn-content">
+          <div class="btn-title">Săn vé tự động toàn bộ</div>
+          <div class="btn-tip">Tìm vé → vào booking → chọn ghế → điền form</div>
+        </div>
+      </button>
+
+      <button class="btn btn-hunt" id="btn-hunt-only">
+        <div class="btn-icon">🔍</div>
+        <div class="btn-content">
+          <div class="btn-title">Chỉ săn vé</div>
+          <div class="btn-tip">Tìm vé → vào booking rồi dừng</div>
+        </div>
+      </button>
+
+      <button class="btn btn-seat" id="btn-seat">
+        <div class="btn-icon">🪑</div>
+        <div class="btn-content">
+          <div class="btn-title">Chỉ chọn ghế</div>
+          <div class="btn-tip">Dùng khi đang ở trang chọn ghế</div>
+        </div>
+      </button>
+
+      <button class="btn btn-form" id="btn-form">
+        <div class="btn-icon">📝</div>
+        <div class="btn-content">
+          <div class="btn-title">Chỉ điền form</div>
+          <div class="btn-tip">Dùng khi đang ở trang checkout</div>
+        </div>
+      </button>
+
+      <button class="btn btn-stop" id="btn-stop">
+        <div class="btn-icon">⏹</div>
+        <div class="btn-content">
+          <div class="btn-title">Dừng Hunt</div>
+          <div class="btn-tip">Dừng poller và clicker</div>
+        </div>
+      </button>
     </div>
   </div>
-  <div id="queue-status" style="font-size:11px;font-weight:600;margin-bottom:8px;min-height:16px;"></div>
-
-  <div class="config-box" id="config-box">
-    <div class="row"><span>Platform</span><span class="val" id="cfg-platform">—</span></div>
-    <div class="row"><span>Mode</span><span class="val" id="cfg-mode">—</span></div>
-    <div class="row"><span>Ưu tiên</span><span class="val" id="cfg-zones">—</span></div>
-    <div class="row"><span>Số lượng</span><span class="val" id="cfg-qty">—</span></div>
-  </div>
-
-  <div class="log-box" id="log-box">Chờ hoạt động...</div>
-
-  <div class="btn-group">
-    <button class="btn btn-auto" id="btn-hunt-auto">
-      <div class="btn-icon">🏹</div>
-      <div class="btn-content">
-        <div class="btn-title">Săn vé tự động toàn bộ</div>
-        <div class="btn-tip">Tìm vé → vào booking → chọn ghế → điền form</div>
-      </div>
-    </button>
-
-    <button class="btn btn-hunt" id="btn-hunt-only">
-      <div class="btn-icon">🔍</div>
-      <div class="btn-content">
-        <div class="btn-title">Chỉ săn vé</div>
-        <div class="btn-tip">Tìm vé → vào booking rồi dừng</div>
-      </div>
-    </button>
-
-    <button class="btn btn-seat" id="btn-seat">
-      <div class="btn-icon">🪑</div>
-      <div class="btn-content">
-        <div class="btn-title">Chỉ chọn ghế</div>
-        <div class="btn-tip">Dùng khi đang ở trang chọn ghế</div>
-      </div>
-    </button>
-
-    <button class="btn btn-form" id="btn-form">
-      <div class="btn-icon">📝</div>
-      <div class="btn-content">
-        <div class="btn-title">Chỉ điền form</div>
-        <div class="btn-tip">Dùng khi đang ở trang checkout</div>
-      </div>
-    </button>
-
-    <button class="btn btn-stop" id="btn-stop">
-      <div class="btn-icon">⏹</div>
-      <div class="btn-content">
-        <div class="btn-title">Dừng Hunt</div>
-        <div class="btn-tip">Dừng poller và clicker</div>
-      </div>
-    </button>
-  </div>
+  <div class="footer">Port 9279 · Alt+1/2/3</div>
 </div>
-<div class="footer">Port 9279 · Alt+1/2/3</div>
+
+<!-- ── Panel: Captcha ── -->
+<div class="tab-panel" id="panel-captcha">
+  <div class="captcha-body">
+
+    <div class="captcha-card">
+      <div class="captcha-card-title">🖱️ Giao thức CDP (Chrome DevTools)</div>
+      <div class="cdp-row">
+        <div class="cdp-info">
+          <div class="cdp-label">Kết nối chuột phần cứng</div>
+          <div class="cdp-desc">
+            Bật để extension điều khiển chuột thật qua CDP,<br>
+            giúp kéo slider captcha chính xác và tự nhiên hơn.
+          </div>
+          <div class="cdp-status-badge disconnected" id="cdp-status-badge">⚫ Chưa kết nối</div>
+        </div>
+        <label class="toggle" style="margin-left:12px;flex-shrink:0;">
+          <input type="checkbox" id="cdp-toggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="captcha-note">
+      <strong>Lưu ý:</strong><br>
+      • Captcha auto-solve chạy tự động khi phát hiện slider trên trang <strong>Ticketbox</strong>.<br>
+      • Bật CDP trước khi vào trang để đạt tốc độ tốt nhất (~0ms delay).<br>
+      • Server xử lý ảnh chạy tại <strong>port 9279</strong> (cùng với Desktop App).
+    </div>
+
+  </div>
+  <div class="footer">Auto Slider Captcha Solver · v2.0</div>
+</div>
 
 <script src="popup.js"></script>
 </body>

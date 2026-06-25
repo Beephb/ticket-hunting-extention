@@ -5,6 +5,69 @@ const API_PORT = 9279;
 const API_BASE = `http://127.0.0.1:${API_PORT}`;
 const CONFIG_POLL_MS = 3000;
 
+// ── CDP Captcha Solver (Auto Slider) ─────────────────────────────────────────
+// Quản lý danh sách các Tab đang giữ kết nối Debugger CDP
+const _cdpAttachedTabs = new Set();
+
+async function _cdpDragSlider(tabId, startX, startY, distanceX) {
+  try {
+    const targetX = startX + distanceX;
+    const overshootX = targetX + (Math.random() * 2 + 2);
+
+    // Đè chuột trái xuống (40ms)
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mousePressed", x: Math.round(startX), y: Math.round(startY),
+      button: "left", buttons: 1, clickCount: 1
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    // Lướt nhanh sang phải (10 bước, delay 5ms)
+    const steps1 = 10;
+    for (let i = 1; i <= steps1; i++) {
+      const t = i / steps1;
+      const ease = 1 - Math.pow(1 - t, 2);
+      const curX = startX + ((overshootX - startX) * ease);
+      const jitterY = startY + (Math.random() * 0.8 - 0.4);
+      await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+        type: "mouseMoved", x: Math.round(curX), y: Math.round(jitterY),
+        button: "none", buttons: 1
+      });
+      await new Promise(r => setTimeout(r, 5));
+    }
+    await new Promise(r => setTimeout(r, 20));
+
+    // Sửa lỗi khớp khít về đích (3 bước, delay 6ms)
+    const steps2 = 3;
+    for (let i = 1; i <= steps2; i++) {
+      const t = i / steps2;
+      const curX = overshootX + ((targetX - overshootX) * t);
+      await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+        type: "mouseMoved", x: Math.round(curX), y: Math.round(startY),
+        button: "none", buttons: 1
+      });
+      await new Promise(r => setTimeout(r, 6));
+    }
+    await new Promise(r => setTimeout(r, 40));
+
+    // Thả chuột
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mouseReleased", x: Math.round(targetX), y: Math.round(startY),
+      button: "left", buttons: 0, clickCount: 1
+    });
+    console.log("✅ [CDP] Đã kéo xong mục tiêu.");
+  } catch (error) {
+    console.error("❌ [CDP Error]:", error);
+  }
+}
+
+// Dọn cdp khi tab đóng
+chrome.tabs.onRemoved.addListener(tabId => {
+  if (_cdpAttachedTabs.has(tabId)) {
+    chrome.debugger.detach({ tabId }).catch(() => {});
+    _cdpAttachedTabs.delete(tabId);
+  }
+});
+
 // ── API auth token (handshake-based, Fix #2) ────────────────────────────────
 // Desktop gen random token mỗi lần start. Extension fetch /handshake (public)
 // để lấy token, cache vào chrome.storage.local. Mọi request sau kèm X-SVP-Auth.
@@ -87,12 +150,19 @@ const CONTENT_SCRIPTS = [
   // Tier 3 — platform modules
   "src/platforms/1zone/hunt.js",
   "src/platforms/ticketbox/hunt.js",
+  "src/platforms/ctiket/hunt.js",
   "src/platforms/1zone/seat_zone.js",
   "src/platforms/1zone/seat_map.js",
   "src/platforms/ticketbox/seat_zone.js",
   "src/platforms/ticketbox/seat_map.js",
+  "src/platforms/ctiket/seat_zone.js",
+  "src/platforms/ctiket/queue_watcher.js",  // poll enter(), tự navigate khi people_ahead=0
   // Tier 3 — shared form filler
   "src/content/form_filler.js",
+  // Tier 3 — captcha solver (chỉ inject trên Ticketbox, xem injectTab())
+  "src/captcha/puzzle-solver.js",
+  "src/captcha/rotation-solver.js",
+  "src/captcha/content.js",
   // Tier 4 — entry orchestrator
   "src/content/runner.js",
 ];
@@ -101,12 +171,14 @@ const CONTENT_SCRIPTS = [
 const MAIN_WORLD_SCRIPTS = [
   "src/injected/page_bridge.js",
   "src/injected/network_hook.js",
+  "src/injected/ctiket_captcha_bridge.js",  // expose window.__ckGetCaptchaToken() cho queue_watcher
 ];
 
 const TARGET_URLS = [
   "https://ticket.1zone.vn/",
   "https://queue.1zone.vn/",
   "https://ticketbox.vn/",
+  "https://cticket.vn/",
 ];
 
 // Scripts nhẹ chỉ inject vào queue.1zone.vn
@@ -128,11 +200,12 @@ let _appOnline = false;
 // ── Inject content scripts vào tab ───────────────────────────────────────────
 
 async function injectTab(tabId, url) {
-  const isTicket = url.startsWith("https://ticket.1zone.vn/");
-  const isQueue  = url.startsWith("https://queue.1zone.vn/");
-  const isTB     = url.startsWith("https://ticketbox.vn/");
+  const isTicket  = url.startsWith("https://ticket.1zone.vn/");
+  const isQueue   = url.startsWith("https://queue.1zone.vn/");
+  const isTB      = url.startsWith("https://ticketbox.vn/");
+  const isCk      = url.startsWith("https://cticket.vn/");
 
-  if (!isTicket && !isQueue && !isTB) return;
+  if (!isTicket && !isQueue && !isTB && !isCk) return;
 
   // Đã inject cho URL này rồi → skip
   if (_injected.get(tabId) === url) {
@@ -157,7 +230,7 @@ async function injectTab(tabId, url) {
       });
       qLog(`[BG] ✅ Queue watcher injected tab ${tabId}`);
     } else {
-      // ticket.1zone.vn + ticketbox.vn: inject full stack
+      // ticket.1zone.vn + ticketbox.vn + cticket.vn (trang /buy chính): inject full stack
       await chrome.scripting.executeScript({
         target: { tabId },
         world: "MAIN",
@@ -208,6 +281,7 @@ chrome.webNavigation.onDOMContentLoaded.addListener(({ tabId, url, frameId }) =>
     { hostSuffix: "ticket.1zone.vn" },
     { hostSuffix: "queue.1zone.vn" },
     { hostSuffix: "ticketbox.vn" },
+    { hostSuffix: "cticket.vn" },
   ]
 });
 
@@ -307,6 +381,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendLog(msg.msg, msg.color);
   }
 
+  if (msg.type === "SVP_GET_CK_TOKEN") {
+    const key = "__svp_ck_booking_token__";
+    chrome.storage.session.get(key).then(stored => {
+      sendResponse({ ok: true, payload: stored?.[key] || null });
+    }).catch(e => {
+      sendResponse({ ok: false, payload: null });
+    });
+    return true;
+  }
+
+  if (msg.type === "SVP_SAVE_CK_TOKEN") {
+    const key = "__svp_ck_booking_token__";
+    chrome.storage.session.set({ [key]: msg.payload }).then(() => {
+      console.log(`[BG] ✅ Đã lưu CK booking_token: eventId=${msg.payload?.eventId}`);
+    }).catch(e => {
+      console.log(`[BG] ❌ Lỗi lưu CK token: ${e.message}`);
+    });
+    sendResponse({ ok: true });
+    return;
+  }
+
   if (msg.type === "SVP_SAVE_EVENT_INFO") {
     // world:"MAIN" không có quyền chrome.storage, background lưu hộ
     chrome.storage.session.set({
@@ -383,6 +478,67 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "DEBUG_LOCKS") {
     sendResponse({ injected: Object.fromEntries(_injected) });
+    return;
+  }
+
+  // ── CDP Captcha handlers ──────────────────────────────────────────────────
+
+  if (msg.type === "CDP_CHECK_STATUS") {
+    const tabId = msg.tabId || sender.tab?.id;
+    sendResponse({ isConnected: tabId ? _cdpAttachedTabs.has(tabId) : false });
+    return true;
+  }
+
+  if (msg.type === "CDP_ATTACH") {
+    const tabId = msg.tabId || sender.tab?.id;
+    if (!tabId) { sendResponse({ status: "error", reason: "no_tabId" }); return true; }
+    if (_cdpAttachedTabs.has(tabId)) { sendResponse({ status: "connected" }); return true; }
+    chrome.debugger.attach({ tabId }, "1.3", () => {
+      if (chrome.runtime.lastError) {
+        console.warn("⚠️ [CDP] Attach lỗi:", chrome.runtime.lastError.message);
+        sendResponse({ status: "error", reason: chrome.runtime.lastError.message });
+      } else {
+        _cdpAttachedTabs.add(tabId);
+        console.log(`⚡ [CDP] Đã attach tab ${tabId}`);
+        sendResponse({ status: "connected" });
+      }
+    });
+    return true;
+  }
+
+  if (msg.type === "CDP_DETACH") {
+    const tabId = msg.tabId || sender.tab?.id;
+    if (!tabId || !_cdpAttachedTabs.has(tabId)) { sendResponse({ status: "disconnected" }); return true; }
+    chrome.debugger.detach({ tabId }, () => {
+      _cdpAttachedTabs.delete(tabId);
+      console.log(`💤 [CDP] Đã detach tab ${tabId}`);
+      sendResponse({ status: "disconnected" });
+    });
+    return true;
+  }
+
+  if (msg.action === "drag_slider" || msg.action === "CDP_DRAG_SLIDER") {
+    const tabId = sender.tab?.id;
+    if (!tabId) return;
+    const startX    = msg.startX    ?? msg.params?.startX    ?? 0;
+    const startY    = msg.startY    ?? msg.params?.startY    ?? 0;
+    const distanceX = msg.distanceX ?? msg.distance ?? msg.params?.distanceX ?? 0;
+    console.log(`🤖 [CDP] Kéo: startX=${Math.round(startX)}, distance=${Math.round(distanceX)}`);
+
+    const dodrag = () => _cdpDragSlider(tabId, startX, startY, distanceX);
+
+    if (!_cdpAttachedTabs.has(tabId)) {
+      chrome.debugger.attach({ tabId }, "1.3", () => {
+        if (!chrome.runtime.lastError) {
+          _cdpAttachedTabs.add(tabId);
+          dodrag();
+        } else {
+          console.warn("⚠️ [CDP] Auto-attach lỗi:", chrome.runtime.lastError.message);
+        }
+      });
+    } else {
+      dodrag();
+    }
     return;
   }
 

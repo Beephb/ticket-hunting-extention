@@ -1,10 +1,11 @@
 # Săn Vé Pro v2.0
 
-Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Ticketbox**, chạy trực tiếp trong Chrome thông qua Extension. Không cần Playwright, không cần Chrome flag đặc biệt — extension đọc cookie/session sẵn có của user.
+Bot tự động săn và mua vé concert/sự kiện trên **1Zone**, **Ticketbox** và **Ctiket**, chạy trực tiếp trong Chrome thông qua Extension. Không cần Playwright, không cần Chrome flag đặc biệt — extension đọc cookie/session sẵn có của user.
 
 **Tốc độ reserve thực đo:**
 - **Ticketbox API-first: ~235ms** (vs Konva click cũ ~3-5s, nhanh hơn 15-20x)
 - **1Zone Tier P: ~3-5s** (bottleneck là Turnstile, không thể bypass)
+- **Ctiket: đang phát triển** (xem mục Trạng thái bên dưới)
 
 ---
 
@@ -14,15 +15,19 @@ Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Tick
 |---|---|---|
 | Hunt poll API + queue-aware | 1Zone | ✅ |
 | Hunt poll API + queue-aware | Ticketbox | ✅ |
+| Hunt + queue-aware | Ctiket | ✅ |
 | Reserve API-first (submit-ticket-info) | Ticketbox | ✅ 235ms |
 | Reserve hybrid (Konva click + frontend sign) | 1Zone | ✅ |
-| XHR hook capture orderId/bookingCode | Cả 2 | ✅ |
+| XHR hook capture orderId/bookingCode | 1Zone, Ticketbox | ✅ |
 | Konva fallback khi API fail | Ticketbox | ✅ |
-| Auto navigate checkout + fill form | Cả 2 | ✅ |
-| Stop hunt signal (dừng tức thì) | Cả 2 | ✅ |
+| Auto navigate checkout + fill form | 1Zone, Ticketbox | ✅ |
+| Stop hunt signal (dừng tức thì) | Cả 3 | ✅ |
 | **Seat availability panel** (popup dropdown Còn/Hết theo zone) | 1Zone | ✅ |
 | **Seat availability overlay** (hiện Còn/Hết trực tiếp lên seatmap Konva) | 1Zone | ✅ toggle on/off |
 | **Event info cross-domain sync** (hunt → background → storage.session, đọc được cả lúc đang ở trang queue) | 1Zone | ✅ |
+| JWT auth qua Google OAuth (Ory Kratos `/sessions/whoami`) | Ctiket | ✅ (logic nằm trong `seat_zone.js`, xem ⚠️ Ghi chú kỹ thuật) |
+| Zone matching (fuzzy score) | Ctiket | ✅ |
+| `waiting-room/enter` (reCAPTCHA v3 → `booking_token`) | Ctiket | 🚧 **Blocker** — xem mục Known Limitations |
 | Desktop UI: clock realtime sync time.is | — | ✅ |
 | Desktop UI: reserve card hiển thị bookingCode + countdown | — | ✅ |
 | Desktop UI: tokens card hiển thị JWT + captcha cache | — | ✅ |
@@ -35,7 +40,7 @@ Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Tick
 |---|---|
 | Ticketbox extension tự refresh access_token | Endpoint `/refresh_token` có field `signature` SHA-256 unknown algorithm — frontend tự handle |
 | 1Zone Tier E3 (mutate body để bypass UI click) | Phase A1 test 2026-05-23: `x-signature` cover body bytes, mutation → 401 |
-| Auto-solve captcha (image processing) | Đã bỏ hẳn flow pre-solve UI — thay bằng seat availability panel (xem mục tính năng mới) |
+| Auto-solve captcha (image/canvas processing) | Đã bỏ hẳn — `captcha.js` hiện tại chỉ detect + chờ user tự giải (pause/resume), không tự giải captcha |
 | Auto thanh toán | Payment luôn user-in-the-loop để tránh charge nhầm |
 
 ---
@@ -47,7 +52,7 @@ Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Tick
 │  Desktop App (Python)   │          │  Chrome Extension (MV3)              │
 │  ─────────────────────  │          │  ──────────────────────────────────  │
 │  CustomTkinter UI       │          │  background.js (service worker)      │
-│  • Tab Chọn Vé          │  HTTP    │  • Inject content scripts            │
+│  • Tab Chọn Vé          │  HTTP    │  • Inject content scripts theo URL   │
 │  • Tab Thông Tin        │ ◄──────► │  • Inject MAIN world hook            │
 │  • Reserve card         │  port    │  • Relay log + event tới desktop     │
 │  • Tokens card          │  9279    │  • Keyboard shortcuts Alt+1/2/3      │
@@ -60,25 +65,28 @@ Bot tự động săn và mua vé concert/sự kiện trên **1Zone** và **Tick
                                      │  MAIN world (page context):          │
                                      │    page_bridge.js — postMessage      │
                                      │    network_hook.js — patch XHR+fetch │
+                                     │    queue_hook_main.js — chỉ trên     │
+                                     │      queue.1zone.vn                  │
                                      │                                      │
                                      │  Isolated world (content):           │
                                      │    runner.js — điều phối trung tâm   │
                                      │    page_bridge_client.js — relay     │
                                      │    platforms/1zone/* — flow 1Zone    │
                                      │    platforms/ticketbox/* — flow TB   │
+                                     │    platforms/ctiket/* — flow Ctiket  │
                                      └──────────────────────────────────────┘
 ```
 
-### Chiến lược 2 platform
+### Chiến lược 3 platform
 
-| | Ticketbox | 1Zone |
-|---|---|---|
-| Strategy | **Pure API-first** | **Hybrid frontend-hook** |
-| Token | `TBoxJWT` cookie (TTL 120s, frontend tự refresh) | JWT localStorage + Turnstile + `x-signature` |
-| Reserve | `POST /event/api/v1/bookings/submit-ticket-info` direct | Click UI → frontend tự sign + send |
-| Fallback | Konva click cũ | (Konva LÀ flow chính) |
-| Output | `bookingCode` | `orderId` |
-| Latency | ~235ms | ~3-5s |
+| | Ticketbox | 1Zone | Ctiket |
+|---|---|---|---|
+| Strategy | **Pure API-first** | **Hybrid frontend-hook** | **API-first** (đang xây) |
+| Token | `TBoxJWT` cookie (TTL 120s, frontend tự refresh) | JWT localStorage + Turnstile + `x-signature` | JWT qua Ory Kratos (`/sessions/whoami?tokenize_as=jwt`), cache 5 phút |
+| Reserve | `POST /event/api/v1/bookings/submit-ticket-info` direct | Click UI → frontend tự sign + send | `POST /tix/private/booking/events/{eventId}/booking` (sau khi có `booking_token`) |
+| Fallback | Konva click cũ | (Konva LÀ flow chính) | Chưa có |
+| Output | `bookingCode` | `orderId` | `booking_token` → đang vướng (xem dưới) |
+| Latency | ~235ms | ~3-5s | Chưa đo được (blocker) |
 
 ---
 
@@ -107,7 +115,8 @@ SanVePro_v2/
 │       ├── background/
 │       │   └── background.js              # Service worker — inject orchestrator
 │       │                                  #   + Poll config /3s, relay log/event
-│       │                                  #   + 2-step inject (MAIN trước, content sau)
+│       │                                  #   + Map riêng cho queue.1zone.vn
+│       │                                  #     và cticket.vn/buy/{id}/queue
 │       │
 │       ├── popup/
 │       │   ├── popup.html                 # Toolbar UI + seat availability dropdown
@@ -116,7 +125,8 @@ SanVePro_v2/
 │       │                                  #   + Overlay toggle (inject lên Konva seatmap)
 │       │
 │       ├── utils/
-│       │   └── mask.js                    # PII/token mask helpers (maskToken/Email/Phone)
+│       │   ├── mask.js                    # PII/token mask helpers (maskToken/Email/Phone)
+│       │   └── rate_limit.js              # Giới hạn tần suất gọi API
 │       │
 │       ├── shared/
 │       │   └── logger.js                  # svpLog + svpEvent (structured)
@@ -140,43 +150,61 @@ SanVePro_v2/
 │       │   ├── api.js                     # Legacy API helpers (1Zone + TB)
 │       │   ├── zone_matcher.js            # Token-based zone fuzzy match
 │       │   ├── konva_clicker.js           # Konva click helpers + runInPage wrapper
-│       │   └── form_filler.js             # Auto-fill form checkout (shared 2 platforms)
+│       │   └── form_filler.js             # Auto-fill form checkout (shared 3 platforms)
 │       │
 │       └── platforms/                     # ── PER-PLATFORM MODULES ──
 │           ├── 1zone/
 │           │   ├── hunt.js                # Poll summary API 200ms + queue-aware
 │           │   ├── xhr_intercept.js       # Capture add-to-cart response → orderId
 │           │   ├── seat_zone.js           # Konva click zone → modal qty → Tiếp tục
-│           │   └── seat_map.js            # Seats.io chart.trySelectObjects
+│           │   ├── seat_map.js            # Seats.io chart.trySelectObjects
+│           │   ├── queue_hook_main.js     # MAIN world — hook fetch/XHR trên queue.1zone.vn
+│           │   └── queue_watcher.js       # ISOLATED world — UI + logic chờ queue
 │           │
-│           └── ticketbox/
-│               ├── hunt.js                # Poll event API 300ms + queue/captcha detect
-│               ├── xhr_intercept.js       # Capture 9 endpoints (login/refresh/captcha/reserve/checkout)
-│               ├── token_manager.js       # Read-only TBoxJWT cookie + parse JWT exp
-│               │                          #   buildHeaders() cho mọi API call
-│               ├── reserve_api.js         # submitTicketInfo() direct POST
-│               │                          #   buildZoneItems / buildMapItems helpers
-│               ├── captcha.js             # Captcha detector + waitForResolved
-│               │                          #   Proactive wait 6s + pause/resume
-│               ├── captcha_solver.js      # Pre-solve API: gen + check + auto-retry rotate
-│               │                          #   Write JWT vào localStorage[tkc_{userId}{showingId}]
-│               │                          #   để frontend TB native reuse
-│               ├── seat_zone.js           # API-first reserve → fallback Konva
-│               └── seat_map.js            # API-first reserve → fallback Konva
+│           ├── ticketbox/
+│           │   ├── hunt.js                # Poll event API 300ms + queue/captcha detect
+│           │   ├── xhr_intercept.js       # Capture 9 endpoints (login/refresh/captcha/reserve/checkout)
+│           │   ├── token_manager.js       # Read-only TBoxJWT cookie + parse JWT exp
+│           │   │                          #   buildHeaders() cho mọi API call
+│           │   ├── reserve_api.js         # submitTicketInfo() direct POST
+│           │   │                          #   buildZoneItems / buildMapItems helpers
+│           │   ├── captcha.js             # ✅ ĐANG DÙNG — Captcha detector + waitForResolved
+│           │   │                          #   Proactive wait 6s + pause/resume, nằm trong
+│           │   │                          #   CONTENT_SCRIPTS (background.js inject mọi tab TB)
+│           │   ├── queue_watcher.js       # Poll queue API, tự resume khi BOOKING
+│           │   ├── seat_zone.js           # API-first reserve → fallback Konva
+│           │   └── seat_map.js            # API-first reserve → fallback Konva
+│           │
+│           └── ctiket/
+│               ├── hunt.js                # Poll + queue-aware cho Ctiket
+│               ├── seat_zone.js           # Zone matching + booking flow
+│               ├── queue_watcher.js       # Theo dõi trang /buy/{id}/queue
+│               ├── auth.js                # ⚠️ KHÔNG ĐƯỢC DÙNG — xem ghi chú dưới
+│               └── _manual_test_console.js # Không auto-inject — script paste tay
+│                                          #   vào DevTools Console để test API thủ công
 │
 └── tests/
     └── phase_a1_signature_test.js         # Snippet test 1Zone signature (đã chạy 2026-05-23)
                                            # Kết quả: BODY_SIGNED → Tier E3 disable vĩnh viễn
 ```
 
+### ⚠️ Ghi chú dọn dẹp (cần xử lý)
+
+| File | Vấn đề |
+|---|---|
+| `platforms/ticketbox/captcha_solver.js` | **File rác** — bản pre-solve cũ (gen/check API), không còn nằm trong list inject của `background.js`, không file nào gọi tới |
+| `platforms/ticketbox/captcha_rotate_solver.js` | **File rác** — bản auto-solve rotate cũ, cũng không được load |
+| `platforms/ctiket/auth.js` | **Orphan** — định nghĩa `getCtiketJwt()`/`fetchFreshCtiketJwt()` tập trung, nhưng không nằm trong `CONTENT_SCRIPTS` hay `CTIKET_QUEUE_SCRIPTS` → không bao giờ chạy. `seat_zone.js`/`queue_watcher.js` của Ctiket hiện tự nhận `jwt` qua tham số riêng, không gọi file này |
+
 ### File quan trọng nhất (đọc theo thứ tự)
 
 1. **`app/main.py`** — Desktop entry point, API server port 9279
 2. **`extension/manifest.json`** — Permissions + web_accessible_resources
-3. **`extension/src/background/background.js`** — Inject orchestrator
+3. **`extension/src/background/background.js`** — Inject orchestrator, danh sách script theo platform/queue
 4. **`extension/src/content/runner.js`** — Content script entry, message router
 5. **`extension/src/platforms/ticketbox/reserve_api.js`** — API-first reserve flow
 6. **`extension/src/injected/network_hook.js`** — XHR/fetch patch trong MAIN world
+7. **`extension/src/platforms/ctiket/seat_zone.js`** — Flow Ctiket hiện tại (đang vướng `waiting-room/enter`)
 
 ---
 
@@ -227,7 +255,7 @@ Trong Desktop App, điền các field rồi bấm **Lưu config**:
 
 | Trường | Mô tả |
 |---|---|
-| **Nền tảng** | `1Zone` hoặc `Ticketbox` |
+| **Nền tảng** | `1Zone`, `Ticketbox` hoặc `Ctiket` |
 | **Kiểu chọn ghế** | `Chọn zone (khu)` hoặc `Chọn ghế cụ thể` |
 | **Ưu tiên** | Tên khu / cú pháp ghế (xem dưới) |
 | **Số lượng vé** | 1, 2, 3... |
@@ -295,108 +323,30 @@ Direct nav vào /booking/ hoặc /select-ticket
   User confirm thanh toán              User confirm thanh toán
 ```
 
----
-
-## 🧩 Pre-solve Captcha (Ticketbox)
-
-Tính năng độc lập với flow chính — giải captcha trước giờ mở bán, lưu token vào storage, lúc rush hour skip luôn modal captcha.
-
-### Cách dùng
-
-1. Trước giờ mở bán **~15-30 phút**, mở tab event/booking Ticketbox
-2. Click icon extension → popup mở
-3. Captcha box hiển thị status:
-   - `🧩 Chưa có captcha` + button **Giải** → click để bắt đầu
-   - `🧩 Còn 47:23` + button OK (xám) → đã có token còn hạn, không cần làm gì
-4. Bấm **Giải** → modal mở với ảnh nền + mảnh ghép
-5. Kéo slider sao cho **mảnh ghép trùng lỗ trong ảnh** → bấm **Xác nhận**
-6. Token JWT TTL 3600s được ghi vào `localStorage[tkc_{userId}{showingId}]`
-7. Khi sale mở, bấm Alt+1: flow reserve **không hiện captcha modal** vì frontend TB tự reuse token đã solve
-
-### Endpoints (đã verify)
-
-| Method | Path | Mục đích |
-|---|---|---|
-| `GET` | `/sapporo/api/v2/capt/gen/{showingId}` | Lấy captcha challenge |
-| `POST` | `/sapporo/api/v2/capt/check/{showingId}` | Submit lời giải → nhận JWT |
-
-Endpoint trên `api-v2.ticketbox.vn`. Headers: `x-tb-access-token` + `x-device-info`. Captcha gen **không yêu cầu fresh access_token** — vẫn 200 OK ngay cả khi token vừa expire.
-
-### Response format `/capt/gen`
-
-```json
-{
-  "data": {
-    "type": "slide" | "rotate",
-    "key": "{showingId}:{hash}",
-    "mobile": false,
-    "slide": { "image": "data:image/jpeg;base64,...", "thumb": "...", "tile_x": 18, "tile_y": 19, "tile_width": 68, "tile_height": 68 },
-    "rotate": { "image": "...", "thumb": "..." }
-  }
-}
-```
-
-`type` random ~50/50 mỗi call. Solver tự retry tới khi ra `slide` (rotate UI chưa support).
-
-### Storage convention
-
-JWT ghi vào `localStorage[tkc_{userId}{showingId}]` (concat trực tiếp, **không có dấu phân tách**). Frontend TB native đọc đúng key này → reuse cho mọi call `/event/api/v1/bookings/*`.
-
-JWT payload:
-```json
-{"verified":true,"user_id":4445570,"device_id":"50ab8f7b...","random":"...","showing_id":62339673251598,"exp":1779379435,"iat":1779375835}
-```
-
-### File liên quan
-
-- [extension/src/platforms/ticketbox/captcha_solver.js](extension/src/platforms/ticketbox/captcha_solver.js) — core logic gen/check/save
-- [extension/src/popup/popup.html](extension/src/popup/popup.html) — captcha box + solve modal
-- [extension/src/popup/popup.js](extension/src/popup/popup.js) — UI logic (status poll 5s, manual slider)
-- [extension/src/content/runner.js](extension/src/content/runner.js) — message handlers `TB_CAPTCHA_STATUS|GEN|CHECK`
-
----
-
-## 🔍 Trạng thái thực tế từng platform
-
-### Ticketbox (Production-ready)
+### [CTIKET] — flow hiện tại (đang xây, có blocker)
 
 ```
-✅ Hunt poll 300ms detect mở bán
-✅ Captcha pause gate (đợi user solve, max 90s)
-✅ Captcha PRE-SOLVE: button popup giải trước giờ mở bán (TTL 1h)
-✅ API-first reserve submit-ticket-info (~235ms)
-✅ bookingCode capture từ response trực tiếp
-✅ Konva click fallback khi API fail
-✅ Navigate question-form auto, form fill auto
-✅ Stop signal dừng tức thì
+Bấm Alt+1 trên tab event Ctiket
+    ↓
+Hunt: poll + queue-aware
+    ↓ (nếu vào trang /buy/{eventId}/queue)
+queue_watcher.js theo dõi trang queue
+    ↓ user bấm "Tiếp tục" (chuyển khỏi queue)
+  → ĐÂY là lúc waiting-room/enter thật sự trigger được
+    (cần reCAPTCHA v3 → trả booking_token)
+    ↓
+🚧 BLOCKER: bot hiện đang cố gọi waiting-room/enter
+   ở trang /buy/ — nhưng API này chỉ hoạt động đúng
+   lúc chuyển queue→tiếp tục, không phải ở /buy/
+    ↓
+(chưa làm tới) submit-booking với booking_token
 ```
-
-**Pre-conditions:**
-- Login Ticketbox (cookie TBoxJWT sẵn)
-- Solve captcha slide 1 lần / suất diễn (token cache TTL 1h)
-- **Tip**: Trước giờ mở bán 15-30 phút, mở popup → bấm "Giải" để pre-solve. Khi sale rush, flow reserve sẽ KHÔNG hiện captcha modal → tiết kiệm 3-8s.
-
-### 1Zone (Production-ready)
-
-```
-✅ Hunt poll 200ms detect availableTickets > 0
-✅ Queue handler tối đa 120s
-✅ Konva click zone / Seats.io select seat
-✅ Wait Turnstile (~3-5s)
-✅ XHR hook capture orderId từ add-to-cart response
-✅ Navigate checkout auto
-✅ Stop signal dừng tức thì
-```
-
-**Pre-conditions:**
-- Login 1Zone (JWT trong localStorage)
-- Mở tab booking trước (Turnstile cần render trong page thật)
 
 ---
 
 ## 🛠 Quy tắc kỹ thuật
 
-1. **Page-driven cho cả 2 platform** — fingerprint tự nhiên, ít bị detect bot
+1. **Page-driven cho cả 3 platform** — fingerprint tự nhiên, ít bị detect bot
 2. **Payment luôn user-in-the-loop** — không auto charge để tránh sai vé
 3. **Token có TTL ngắn** → frontend tự refresh, extension chỉ đọc
 4. **MAIN world XHR hook** — bypass isolated world để patch fetch/XHR thật
@@ -445,36 +395,9 @@ window.__SVP_TB_TOKEN__.status()
 window.__SVP_TB_CAPTCHA__.isVisible()
 // → true/false
 
-window.__SVP_TB_CAPTCHA_SOLVER__.getStatus()
-// → {ok, showingId, hasToken, remainingMs, source}
-
 window.__SVP_HOOK__.status()  // MAIN world context
 // → {enabled: true, patterns: [...]}
 ```
-
-### Kiểm tra captcha token đã lưu
-
-```js
-// Liệt kê tất cả captcha tokens cached + remaining time
-Object.keys(localStorage).filter(k => k.startsWith('tkc_')).forEach(k => {
-  const t = localStorage.getItem(k);
-  const b64 = t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
-  const p = JSON.parse(atob(b64 + '='.repeat((4 - b64.length%4) % 4)));
-  const remS = Math.round((p.exp*1000 - Date.now())/1000);
-  console.log(k, "| showing:", p.showing_id, "|", remS > 0 ? `✅ còn ${remS}s` : `❌ expired`);
-});
-
-// Xóa token expired
-Object.keys(localStorage).filter(k => k.startsWith('tkc_')).forEach(k => {
-  try {
-    const b64 = localStorage.getItem(k).split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
-    const p = JSON.parse(atob(b64 + '='.repeat((4 - b64.length%4) % 4)));
-    if (p.exp*1000 < Date.now()) localStorage.removeItem(k);
-  } catch { localStorage.removeItem(k); }
-});
-```
-
----
 
 ---
 
@@ -592,19 +515,6 @@ Khách đã cài v2.0.0, muốn update v2.1.0:
 
 ---
 
-## 📚 Tài liệu tham khảo
-
-- **`tests/phase_a1_signature_test.js`** — Snippet test reverse 1Zone signature
-- Memory files trong `.claude/memory/`:
-  - `project_architecture.md` — Kiến trúc tổng quan
-  - `project_roadmap.md` — 5-stage implementation plan
-  - `ticketbox_token_format.md` — Cookie schema TBoxJWT chi tiết
-  - `ticketbox_captcha_presolve.md` — Endpoints + storage convention pre-solve captcha (2026-05-26)
-  - `onezone_signature_test.md` — Kết quả Phase A1
-  - `stage1/3/4_done.md` — Tracking các milestone
-
----
-
 ## 📊 Performance benchmark thực đo (2026-05-24)
 
 | Operation | Latency |
@@ -614,7 +524,6 @@ Khách đã cài v2.0.0, muốn update v2.1.0:
 | API reserve Ticketbox | **235ms** |
 | Konva click reserve (1Zone) | 3-5s |
 | Captcha gate proactive wait | 6s |
-| Captcha solved → bot resume | 600-800ms |
 | Stop hunt signal → all loops abort | <1s |
 | Time sync (HTTP Date Google) | 1-2s mỗi 60s |
 
@@ -624,19 +533,23 @@ Khách đã cài v2.0.0, muốn update v2.1.0:
 
 | Issue | Workaround |
 |---|---|
+| **Ctiket `waiting-room/enter` chỉ trigger được lúc rời trang queue (nút "Tiếp tục"), không phải ở `/buy/`** | **Chưa giải quyết** — cần quyết định: bot tự xử lý luôn flow queue, hay chỉ can thiệp từ `/buy/` trở đi |
 | Token Ticketbox expire trong flight (>30s idle) | Reload tab để frontend tự refresh |
-| Captcha hết TTL 1h | Pre-solve lại qua popup button (15-30 phút trước giờ mở bán) |
-| Captcha type=rotate (xoay ảnh) chưa hỗ trợ solve | Solver tự retry gen tới khi server trả slide (~50/50 mỗi call) |
 | Hook fetch broken trên Ticketbox (Next.js override) | XHR hook vẫn alive → reserve responses vẫn capture |
 | Cloudflare/Ticketbox bot detect | Page-driven approach giảm rủi ro nhưng không zero |
 | 1Zone bundle deploy đổi DOM/Konva | Có Konva fallback nhưng vẫn cần test lại |
+| 2 file captcha cũ (`captcha_solver.js`, `captcha_rotate_solver.js`) còn tồn đọng trong repo | Nên xóa — không còn được dùng |
+| `platforms/ctiket/auth.js` viết ra nhưng chưa wire vào pipeline | Cần gắn vào `CTIKET_QUEUE_SCRIPTS`/`CONTENT_SCRIPTS` hoặc xóa nếu logic JWT đã chuyển sang nơi khác |
 
 ---
 
-## 🗺 Roadmap tiếp theo (optional)
+## 🗺 Roadmap tiếp theo
 
 | Việc | Effort | Status |
 |---|---|---|
+| Giải quyết blocker `waiting-room/enter` Ctiket | — | 🚧 Đang làm — top priority |
+| Submit booking Ctiket (sau khi có booking_token) | — | Pending (phụ thuộc trên) |
+| Dọn file rác (`captcha_solver.js`, `captcha_rotate_solver.js`) + `auth.js` orphan | 15 phút | Pending |
 | Test E2E nhiều scenarios (race, alternates) | 1 ngày | Pending |
 | Wire alternates config vào seat_*.js | 2-3 giờ | Pending |
 | 1Zone fast paths (E1/E2/E4) | 1-2 tuần | Deferred (ROI thấp) |

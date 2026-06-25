@@ -3,6 +3,22 @@
 if (window.__SVP_INJECTED__) {
   console.log("[SVP] Already injected, skip");
 } else {
+
+// ── Platform config helpers ───────────────────────────────────────────────────
+// Config moi luu theo platform key: auto_seat.{key}.zone_priority v.v.
+// Helper tu dong lookup dung key theo platform display name.
+
+const _PLATFORM_KEY_MAP = { "1Zone": "1zone", "Ticketbox": "ticketbox", "Ctiket": "ctiket" };
+
+function _getPlatformKey(platform) {
+  return _PLATFORM_KEY_MAP[platform] || "1zone";
+}
+
+// Tra ve platform-specific config, fallback ve auto_seat flat (cau truc cu)
+function _getPlatformCfg(cfg, platform) {
+  const pk = _getPlatformKey(platform);
+  return cfg?.auto_seat?.[pk] || cfg?.auto_seat || {};
+}
 window.__SVP_INJECTED__ = true;
 
 const _HUNT_FLAG_KEY = "__svp_hunt_done__";
@@ -19,8 +35,9 @@ async function initConfig() {
     chrome.runtime.sendMessage({ type: "GET_CONFIG" }, res => {
       if (res && res.config) {
         _cfg = res.config;
-        _enabled = !!res.config?.auto_seat?.enabled;
-        svpLog(`⚙️ Config loaded | platform=${_cfg?.auto_seat?.platform} | enabled=${_enabled}`, "blue");
+        const _initPlatform = res.config?.active_platform || "1Zone";
+        _enabled = !!_getPlatformCfg(res.config, _initPlatform)?.enabled;
+        svpLog(`⚙️ Config loaded | platform=${_initPlatform} | enabled=${_enabled}`, "blue");
       }
       resolve(_cfg);
     });
@@ -47,7 +64,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "CONFIG_UPDATE") {
     const wasEnabled = _enabled;
     _cfg = msg.config;
-    _enabled = !!msg.config?.auto_seat?.enabled;
+    const _updPlatform = msg.config?.active_platform || "1Zone";
+    _enabled = !!_getPlatformCfg(msg.config, _updPlatform)?.enabled;
     if (!wasEnabled && _enabled) {
       svpLog("🟢 Bot được bật — bắt đầu check trang...", "green");
       maybeRun();
@@ -89,6 +107,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     svpRequestStop?.();
     stopHunt1Zone?.();
     stopHuntTicketbox?.();
+    stopHuntCtiket?.();
     _running = false;
     // Dừng indicator và clear interval
     hideIndicator();
@@ -181,6 +200,7 @@ async function startHunt(autoSeat = true) {
     if (autoSeat) setHuntFlag();
     if (platform === "1Zone") await hunt1Zone(_cfg);
     else if (platform === "Ticketbox") await huntTicketbox(_cfg);
+    else if (platform === "Ctiket") await huntCtiket(_cfg);
   } catch (e) {
     svpLog(`❌ Hunt lỗi: ${e.message}`, "red");
     if (autoSeat) sessionStorage.removeItem(_HUNT_FLAG_KEY);
@@ -255,8 +275,8 @@ function hideIndicator() {
 function startHuntIndicator(cfg) {
   _indicatorStartTime = Date.now();
   _indicatorPollCount = 0;
-  const zone = (cfg?.auto_seat?.zone_priority || [])[0] || "—";
-  const qty = cfg?.auto_seat?.quantity || 1;
+  const zone = (_getPlatformCfg(cfg, cfg?.active_platform || "1Zone")?.zone_priority || [])[0] || "—";
+  const qty = _getPlatformCfg(cfg, cfg?.active_platform || "1Zone")?.quantity || 1;
   if (_indicatorInterval) clearInterval(_indicatorInterval);
   _indicatorInterval = setInterval(() => {
     _indicatorPollCount++;
@@ -270,82 +290,80 @@ function startHuntIndicator(cfg) {
 
 // ── Toast thông báo trên trang ────────────────────────────────────────────────
 
-function showSeatFailToast(mode) {
-  // Xóa toast cũ nếu có
-  document.getElementById("__svp_toast__")?.remove();
 
-  const toast = document.createElement("div");
-  toast.id = "__svp_toast__";
-  toast.style.cssText = `
-    position: fixed;
-    top: 16px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 999999;
-    background: #1a1a2e;
-    border: 2px solid #ef4444;
-    border-radius: 12px;
-    padding: 16px 20px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    min-width: 340px;
-    max-width: 90vw;
-    font-family: -apple-system, 'Segoe UI', sans-serif;
-    animation: __svp_slide_in 0.3s ease;
-  `;
+function showSeatRetryToast(mode, attempt) {
+  // Toast retry liên tục — cập nhật tại chỗ, không tạo lại DOM mỗi lần (tránh nhấp nháy)
+  let toast = document.getElementById("__svp_toast__");
 
-  const style = document.createElement("style");
-  style.textContent = `
-    @keyframes __svp_slide_in {
-      from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
-      to   { opacity: 1; transform: translateX(-50%) translateY(0); }
-    }
-    #__svp_toast__ button:hover { opacity: 0.85; }
-  `;
-  document.head.appendChild(style);
+  if (!toast) {
+    const style = document.createElement("style");
+    style.textContent = `
+      @keyframes __svp_slide_in {
+        from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+        to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+      }
+      #__svp_toast__ button:hover { opacity: 0.85; }
+    `;
+    document.head.appendChild(style);
 
-  toast.innerHTML = `
-    <div style="font-size:28px;line-height:1">⚠️</div>
-    <div style="flex:1">
-      <div style="color:#ef4444;font-weight:700;font-size:15px;margin-bottom:4px">
-        Không chọn được ghế!
+    toast = document.createElement("div");
+    toast.id = "__svp_toast__";
+    toast.style.cssText = `
+      position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+      z-index: 999999; background: #1a1a2e; border: 2px solid #f97316;
+      border-radius: 12px; padding: 16px 20px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      display: flex; align-items: center; gap: 14px; min-width: 340px; max-width: 90vw;
+      font-family: -apple-system, 'Segoe UI', sans-serif; animation: __svp_slide_in 0.3s ease;
+    `;
+    toast.innerHTML = `
+      <div style="font-size:28px;line-height:1">⏳</div>
+      <div style="flex:1">
+        <div style="color:#f97316;font-weight:700;font-size:15px;margin-bottom:4px">
+          Chưa chọn được ghế, vẫn đang tiếp tục retry...
+        </div>
+        <div id="__svp_toast_sub__" style="color:#94a3b8;font-size:12px;line-height:1.4">
+          Hết ghế ở các khu ưu tiên. Bot sẽ tự thử lại liên tục.
+        </div>
       </div>
-      <div style="color:#94a3b8;font-size:12px;line-height:1.4">
-        Hết ghế hoặc lỗi khi chọn ${mode}.<br>Hãy tự chọn ghế thủ công trên trang.
-      </div>
-    </div>
-    <button id="__svp_btn_close__" style="
-      background:#ef4444;color:#fff;border:none;border-radius:8px;
-      padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;
-      white-space:nowrap;flex-shrink:0;
-    ">Tự chọn ghế</button>
-  `;
+      <button id="__svp_btn_close__" style="
+        background:#ef4444;color:#fff;border:none;border-radius:8px;
+        padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;
+        white-space:nowrap;flex-shrink:0;
+      ">Dừng chọn thủ công</button>
+    `;
+    document.body.appendChild(toast);
 
-  document.body.appendChild(toast);
+    document.getElementById("__svp_btn_close__")?.addEventListener("click", () => {
+      svpRequestStop();
+      svpLog("🛑 User bấm 'Dừng chọn thủ công' trên toast retry", "yellow");
+      toast.remove();
+    });
+  }
 
-  // Nút tự chọn ghế — chỉ đóng toast
-  document.getElementById("__svp_btn_close__")?.addEventListener("click", () => toast.remove());
-
-  // Tự đóng sau 30s
-  setTimeout(() => toast.remove(), 30000);
+  const sub = document.getElementById("__svp_toast_sub__");
+  if (sub) sub.textContent = `Lần thử #${attempt} · ${mode} — Bot sẽ tự thử lại liên tục.`;
 }
+
 
 
 
 async function maybeRun(force = false) {
   if (_running) { svpLog("⏳ Bot đang chạy, bỏ qua", "gray"); return; }
-  if (!_enabled && !force) return;
+
   if (!_cfg) { await initConfig(); }
   if (!_cfg) { svpLog("❌ Không lấy được config từ App", "red"); return; }
 
   const platform = detectPlatform();
   if (!platform) return;
 
+  // Kiem tra enabled theo platform cua trang hien tai (khong phu thuoc active_platform)
+  const pagePlatformCfg = _getPlatformCfg(_cfg, platform);
+  const platformEnabled = !!pagePlatformCfg?.enabled;
+  if (!platformEnabled && !force) return;
+
   const pageType = detectPageType();
-  const cfgPlatform = _cfg?.auto_seat?.platform || "";
-  const mode = _cfg?.auto_seat?.seat_mode || "seat_zone";
+  const _pcfg = _getPlatformCfg(_cfg, platform);
+  const mode = _pcfg?.seat_mode || "seat_zone";
 
   svpLog(`🚀 Platform=${platform} | PageType=${pageType} | mode=${mode}`, "blue");
 
@@ -360,12 +378,17 @@ async function maybeRun(force = false) {
     return;
   }
 
-  if (cfgPlatform && platform !== cfgPlatform) {
-    svpLog(`⚠️ Platform trang (${platform}) ≠ config (${cfgPlatform})`, "yellow");
+  // Ctiket queue page: khoi dong queue_watcher chi khi co hunt flag
+  if (pageType === "queue_ctiket") {
+    const huntActive = !!sessionStorage.getItem(_HUNT_FLAG_KEY);
+    if (huntActive) {
+      svpLog("⏳ Detect trang Ctiket queue — khởi động queue_watcher...", "blue");
+      watchLoop?.();
+    }
     return;
   }
 
-  const isBookingPage = pageType === "booking_1zone" || pageType === "select_ticket_tb";
+  const isBookingPage = pageType === "booking_1zone" || pageType === "select_ticket_tb" || pageType === "buy_ctiket";
   if (!isBookingPage) {
     svpLog(`ℹ️ Trang hiện tại (${pageType}) không phải trang chọn vé — chờ điều hướng`, "gray");
     return;
@@ -377,20 +400,53 @@ async function maybeRun(force = false) {
   try {
     svpLog(`🪑 Route: ${platform} + ${mode}`, "blue");
     let seatOk = false;
+    let attempt = 0;
+    const startUrl = location.href;
     showIndicator("🟡 Đang chọn ghế...", `${platform} · ${mode}`, "#facc15");
-    if (platform === "1Zone" && mode === "seat_zone") seatOk = await run1ZoneSeatZone(_cfg);
-    else if (platform === "1Zone" && mode === "seat_map") seatOk = await run1ZoneSeatMap(_cfg);
-    else if (platform === "Ticketbox" && mode === "seat_zone") seatOk = await runTicketboxSeatZone(_cfg);
-    else if (platform === "Ticketbox" && mode === "seat_map") seatOk = await runTicketboxSeatMap(_cfg);
-    else { svpLog(`⚠️ Không có flow cho: ${platform} + ${mode}`, "yellow"); return; }
+
+    while (true) {
+      attempt++;
+      if (svpShouldStop()) {
+        svpLog("🛑 Dừng chọn ghế theo yêu cầu", "yellow");
+        break;
+      }
+      if (location.href !== startUrl) {
+        // Trang đã điều hướng đi (vd: vào checkout do nguyên nhân khác) — loop cũ vô nghĩa, để watchNavigation xử lý
+        svpLog("↪️ Trang đã chuyển — dừng retry loop hiện tại", "gray");
+        break;
+      }
+
+      if (platform === "1Zone" && mode === "seat_zone") seatOk = await run1ZoneSeatZone({ ..._cfg, _seatRetryAttempt: attempt });
+      else if (platform === "1Zone" && mode === "seat_map") seatOk = await run1ZoneSeatMap(_cfg);
+      else if (platform === "Ticketbox" && mode === "seat_zone") seatOk = await runTicketboxSeatZone(_cfg);
+      else if (platform === "Ticketbox" && mode === "seat_map") seatOk = await runTicketboxSeatMap(_cfg);
+      else if (platform === "Ctiket" && mode === "seat_zone") seatOk = await runCtiketSeatZone(_cfg);
+      else { svpLog(`⚠️ Không có flow cho: ${platform} + ${mode}`, "yellow"); break; }
+
+      if (seatOk) break;
+
+      // Chưa chọn được — báo + retry liên tục cho tới khi có ghế hoặc user bấm dừng
+      svpLog(`⏳ Lần ${attempt}: chưa chọn được ghế, đang retry...`, "yellow");
+      showIndicator("🟠 Chưa có ghế — đang retry...", `Lần thử #${attempt} | ${platform} · ${mode}`, "#f97316");
+      showSeatRetryToast(mode, attempt);
+
+      if (svpShouldStop()) {
+        svpLog("🛑 Dừng chọn ghế theo yêu cầu", "yellow");
+        break;
+      }
+      const slept = await svpSleep(1800);
+      if (!slept) { svpLog("🛑 Dừng trong lúc chờ retry", "yellow"); break; }
+    }
 
     if (!seatOk) {
-      const msg = "⚠️ Chọn ghế không thành công (hết ghế hoặc lỗi). Bấm Alt+2 để thử lại thủ công.";
-      svpLog(msg, "red");
-      chrome.runtime.sendMessage({ type: "LOG", msg, color: "red" });
-      showIndicator("⚠️ Không chọn được ghế", "Bấm Alt+2 để tự chọn thủ công", "#ef4444");
-      showSeatFailToast(mode);
+      document.getElementById("__svp_toast__")?.remove();
+      if (svpShouldStop()) {
+        showIndicator("⚪ Đã dừng", "Bạn đã chọn dừng — tự chọn ghế thủ công", "#64748b");
+      } else {
+        showIndicator("⚠️ Không chọn được ghế", "Trang đã chuyển hoặc lỗi khác", "#ef4444");
+      }
     } else {
+      document.getElementById("__svp_toast__")?.remove();
       showIndicator("🟢 Đã vào checkout!", "Đang điền form...", "#22c55e");
       setTimeout(hideIndicator, 5000);
     }
@@ -425,6 +481,24 @@ function watchNavigation() {
             svpLog(`⚠️ Fill form lỗi: ${e.message}`, "yellow");
           }
         }, 2000);
+        return;
+      }
+
+      // Ctiket SPA nav sang /queue — goi watchLoop chi khi co hunt flag
+      if (/\/buy\/[a-zA-Z0-9]+\/queue/.test(location.pathname)) {
+        const huntActive = !!sessionStorage.getItem(_HUNT_FLAG_KEY);
+        if (huntActive) {
+          svpLog("⏳ SPA nav → Ctiket queue — khởi động queue_watcher...", "blue");
+          setTimeout(() => watchLoop?.(), 800);
+        }
+        return;
+      }
+
+      // Ctiket SPA nav sang /buy (sau khi click button tu queue)
+      // Chi force run neu co hunt flag — tranh tu chay khi user vao trang thu cong
+      if (/\/buy\/[a-zA-Z0-9]+/.test(location.pathname) && !/queue/.test(location.pathname)) {
+        const huntActive = !!sessionStorage.getItem(_HUNT_FLAG_KEY);
+        setTimeout(() => maybeRun(huntActive), 1500);
         return;
       }
 

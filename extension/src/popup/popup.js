@@ -2,6 +2,91 @@
 const API_BASE = "http://127.0.0.1:9279";
 const LOGS = [];
 
+// ── Main tab switching (Săn Vé / Captcha) ────────────────────────────────────
+function initMainTabs() {
+  const tabs = document.querySelectorAll(".main-tab");
+  tabs.forEach(tab => {
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.tab;
+      tabs.forEach(t => t.classList.toggle("active", t.dataset.tab === target));
+      document.querySelectorAll(".tab-panel").forEach(p => {
+        p.classList.toggle("active", p.id === `panel-${target}`);
+      });
+      if (target === "captcha") initCdpTab();
+    });
+  });
+}
+
+// ── CDP Toggle (Tab Captcha) ──────────────────────────────────────────────────
+async function initCdpTab() {
+  const toggle = document.getElementById("cdp-toggle");
+  const badge  = document.getElementById("cdp-status-badge");
+  if (!toggle || !badge) return;
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) return;
+
+  // Query trạng thái CDP hiện tại của tab
+  chrome.runtime.sendMessage({ type: "CDP_CHECK_STATUS", tabId: tab.id }, res => {
+    const connected = !!res?.isConnected;
+    toggle.checked = connected;
+    _updateCdpBadge(badge, connected);
+  });
+
+  // Clone để tránh duplicate event listener khi user bật/tắt tab nhiều lần
+  const fresh = toggle.cloneNode(true);
+  toggle.replaceWith(fresh);
+  fresh.addEventListener("change", async () => {
+    const action = fresh.checked ? "CDP_ATTACH" : "CDP_DETACH";
+    chrome.runtime.sendMessage({ type: action, tabId: tab.id }, res => {
+      const connected = res?.status === "connected";
+      fresh.checked = connected;
+      _updateCdpBadge(document.getElementById("cdp-status-badge"), connected);
+    });
+  });
+}
+
+function _updateCdpBadge(badge, connected) {
+  if (!badge) return;
+  if (connected) {
+    badge.textContent = "⚡ Đang kết nối";
+    badge.className = "cdp-status-badge connected";
+  } else {
+    badge.textContent = "⚫ Chưa kết nối";
+    badge.className = "cdp-status-badge disconnected";
+  }
+}
+
+initMainTabs();
+
+const PLATFORM_KEY_MAP = { "1Zone": "1zone", "Ticketbox": "ticketbox", "Ctiket": "ctiket" };
+
+// ── Detect platform theo tab đang active trong window hiện tại ───────────────
+async function detectActivePlatform() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const url = tab?.url || "";
+    if (url.includes("1zone.vn")) return "1Zone";
+    if (url.includes("ticketbox.vn")) return "Ticketbox";
+    if (url.includes("cticket.vn")) return "Ctiket";
+  } catch {}
+  return null; // tab hiện tại không phải trang nào trong 3 platform
+}
+
+function renderPlatformTabs(activePlatform) {
+  for (const [platform] of Object.entries(PLATFORM_KEY_MAP)) {
+    const el = document.getElementById(`tab-${PLATFORM_KEY_MAP[platform]}`);
+    if (!el) continue;
+    if (platform === activePlatform) {
+      el.classList.add("active");
+      el.classList.remove("inactive-dim");
+    } else {
+      el.classList.remove("active");
+      el.classList.add(activePlatform ? "inactive-dim" : "");
+    }
+  }
+}
+
 // ── Auth helper — lấy token từ chrome.storage (set bởi background.js) ───────
 async function _authHeaders() {
   try {
@@ -97,14 +182,16 @@ async function saveEnabled(val) {
   } catch {}
 }
 
-function renderConfig(cfg) {
-  const as = cfg?.auto_seat || {};
-  document.getElementById("cfg-platform").textContent = as.platform || "—";
-  document.getElementById("cfg-mode").textContent = as.seat_mode || "—";
-  const zones = (as.zone_priority || as.priority_targets || []).slice(0, 3).join(", ") || "—";
+function renderConfig(cfg, activePlatform) {
+  const pk = PLATFORM_KEY_MAP[activePlatform];
+  const as_ = pk ? (cfg?.auto_seat?.[pk] || {}) : {};
+
+  document.getElementById("cfg-platform").textContent = activePlatform || "—";
+  document.getElementById("cfg-mode").textContent = as_.seat_mode || "—";
+  const zones = (as_.zone_priority || as_.priority_targets || []).slice(0, 3).join(", ") || "—";
   document.getElementById("cfg-zones").textContent = zones;
-  document.getElementById("cfg-qty").textContent = as.quantity || 1;
-  document.getElementById("bot-toggle").checked = !!as.enabled;
+  document.getElementById("cfg-qty").textContent = as_.quantity || 1;
+  document.getElementById("bot-toggle").checked = !!as_.enabled;
 }
 
 function addLog(msg) {
@@ -116,6 +203,9 @@ function addLog(msg) {
 }
 
 async function init() {
+  const activePlatform = await detectActivePlatform();
+  renderPlatformTabs(activePlatform);
+
   const cfg = await fetchConfig();
   const dot = document.getElementById("app-dot");
   const status = document.getElementById("app-status");
@@ -124,8 +214,10 @@ async function init() {
     dot.className = "dot online";
     status.textContent = "Desktop App đang chạy";
     document.getElementById("sub-text").textContent = "v2.0.0 · Kết nối OK";
-    renderConfig(cfg);
-    addLog(`Config loaded: ${cfg?.auto_seat?.platform} / ${cfg?.auto_seat?.seat_mode}`);
+    renderConfig(cfg, activePlatform);
+    addLog(activePlatform
+      ? `Platform: ${activePlatform} — Config loaded`
+      : "Mở 1 trang 1Zone/Ticketbox/Ctiket để xem config");
   } else {
     dot.className = "dot offline";
     status.textContent = "Desktop App chưa chạy (port 9279)";
@@ -452,8 +544,10 @@ setInterval(tickClock, 100);
 // Re-sync mỗi 30s nếu popup vẫn mở
 setInterval(syncTimeOffset, 30000);
 
-// Refresh config mỗi 5 giây
+// Refresh config mỗi 5 giây — re-detect platform vì user có thể đổi tab trình duyệt
 setInterval(async () => {
+  const activePlatform = await detectActivePlatform();
+  renderPlatformTabs(activePlatform);
   const cfg = await fetchConfig();
-  if (cfg) renderConfig(cfg);
+  if (cfg) renderConfig(cfg, activePlatform);
 }, 5000);

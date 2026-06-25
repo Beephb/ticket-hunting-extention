@@ -85,6 +85,7 @@ function detectPlatform() {
   const host = location.hostname;
   if (host.includes("1zone")) return "1Zone";
   if (host.includes("ticketbox")) return "Ticketbox";
+  if (host.includes("cticket")) return "Ctiket";
   return null;
 }
 
@@ -94,6 +95,9 @@ function detectPageType() {
   const path = location.pathname;
   if (/\/booking\//.test(path)) return "booking_1zone";
   if (/\/events\/\d+\/bookings\/\d+\/select-ticket/.test(path)) return "select_ticket_tb";
+  // Ctiket: /buy/{eid}/queue (hàng chờ) vs /buy/{eid} (trang chọn vé)
+  if (/\/buy\/[^/?#]+\/queue/.test(path)) return "queue_ctiket";
+  if (/\/buy\/[^/?#]+/.test(path)) return "buy_ctiket";
   if (/\/events\//.test(path)) return "event";
   if (/\/checkout/.test(path) || /\/order\//.test(path) || /\/question-form/.test(path)) return "checkout";
   return "other";
