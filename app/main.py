@@ -80,6 +80,11 @@ API_TOKEN = _gen_api_token()  # NEW token mỗi lần app start
 # /solve public vì captcha solver gọi trực tiếp từ content script, không có token
 _PUBLIC_ENDPOINTS = {"/handshake", "/ping", "/solve"}
 
+# ── Scan fields state ─────────────────────────────────────────────────────────
+_scan_pending = False          # Desktop đang chờ kết quả scan
+_scan_result  = None           # Kết quả trả về từ extension
+_scan_event   = threading.Event()  # Signal khi có kết quả
+
 # ── Mode label mapping (UI tiếng Việt ↔ internal key) ────────────────────────
 MODE_LABEL_ZONE = "Chọn zone (khu)"
 MODE_LABEL_MAP  = "Chọn ghế cụ thể"
@@ -160,11 +165,11 @@ def _default_seat_cfg():
         "require_adjacent": True,
         "allow_split_seats": False,
         "allow_partial": False,
-        "enabled": False,
     }
 
 DEFAULT_CONFIG = {
     "name": "", "phone": "", "email": "", "address": "",
+    "custom_fields": [],  # [{keyword, value}, ...]
     "active_platform": "1Zone",  # tab nào đang được chọn hiển thị cuối cùng trên UI
     "auto_seat": {
         "1zone": _default_seat_cfg(),
@@ -314,6 +319,9 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send_json(200, {"command": cmd})
                 else:
                     self._send_json(200, {"command": None})
+        elif self.path == "/scan-fields/poll":
+            # Extension poll để biết có pending scan không → trả {pending: bool}
+            self._send_json(200, {"pending": _scan_pending})
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -374,6 +382,13 @@ class _Handler(BaseHTTPRequestHandler):
             # Captcha solver endpoint — được gọi bởi puzzle-solver.js + rotation-solver.js
             result = _solve_captcha(data)
             self._send_json(200 if result.get("ok") else 500, result)
+        elif self.path == "/scan-fields":
+            # Extension POST kết quả scan fields về đây
+            global _scan_pending, _scan_result
+            _scan_result  = data.get("fields", [])
+            _scan_pending = False
+            _scan_event.set()
+            self._send_json(200, {"ok": True})
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -403,15 +418,11 @@ class _Handler(BaseHTTPRequestHandler):
                 "durationMs": payload.get("durationMs"),
                 "capturedAt": int(_now_synced_ms() * 1000),
             }
-            if _app_ref:
-                _app_ref.after(0, _app_ref.update_reserve_card)
         elif ev == "token.status":
             _token_status[platform] = {
                 **{k: v for k, v in data.items() if k != "platform"},
                 "updatedAt": int(_now_synced_ms() * 1000),
             }
-            if _app_ref:
-                _app_ref.after(0, _app_ref.update_tokens_card)
 
 # ── Captcha Solver (OpenCV) ───────────────────────────────────────────────────
 
@@ -685,6 +696,63 @@ class SeatMapRow(ctk.CTkFrame):
         elif val:
             self.inp_zone.insert(0, val)
 
+
+class CtiketZoneRow(ctk.CTkFrame):
+    """1 dòng ưu tiên zone cho Ctiket: Tên zone + Số lượng + nút xóa."""
+
+    def __init__(self, parent, on_delete, **kwargs):
+        super().__init__(parent, fg_color=C_PANEL2, corner_radius=8, **kwargs)
+        self.on_delete = on_delete
+        self.grid_columnconfigure(0, weight=3)
+        self.grid_columnconfigure(1, weight=1)
+
+        # Tên zone
+        ctk.CTkLabel(self, text="Tên khu", font=("Arial", 10), text_color=C_MUTED
+                     ).grid(row=0, column=0, padx=(8,2), pady=(6,0), sticky="w")
+        self.inp_zone = ctk.CTkEntry(self, placeholder_text="VD: SVIP B", height=30,
+                                      font=("Arial", 11))
+        self.inp_zone.grid(row=1, column=0, padx=(8,2), pady=(0,6), sticky="ew")
+
+        # Số lượng
+        ctk.CTkLabel(self, text="SL", font=("Arial", 10), text_color=C_MUTED
+                     ).grid(row=0, column=1, padx=2, pady=(6,0), sticky="w")
+        self.inp_qty = ctk.CTkEntry(self, placeholder_text="1", height=30,
+                                     font=("Arial", 11), width=60)
+        self.inp_qty.grid(row=1, column=1, padx=2, pady=(0,6), sticky="ew")
+
+        # Nút xóa
+        ctk.CTkButton(self, text="✕", width=28, height=28, fg_color="#374151",
+                      hover_color="#4b5563", font=("Arial", 11),
+                      command=self._delete
+                      ).grid(row=0, column=2, rowspan=2, padx=(4,8), pady=4)
+
+    def _delete(self):
+        self.destroy()
+        self.on_delete()
+
+    def get_value(self):
+        zone = self.inp_zone.get().strip()
+        if not zone:
+            return None
+        try:
+            qty = int(self.inp_qty.get().strip())
+        except Exception:
+            qty = 1
+        return {"zone": zone, "quantity": max(1, qty)}
+
+    def set_value(self, item):
+        """item: {"zone": str, "quantity": int}"""
+        if isinstance(item, dict):
+            zone = item.get("zone", "")
+            qty = item.get("quantity", 1)
+        else:
+            zone = str(item)
+            qty = 1
+        if zone:
+            self.inp_zone.insert(0, zone)
+        self.inp_qty.delete(0, "end")
+        self.inp_qty.insert(0, str(qty))
+
 # ── Main App ──────────────────────────────────────────────────────────────────
 
 class App(ctk.CTk):
@@ -706,9 +774,8 @@ class App(ctk.CTk):
         self.add_log("📌 Load extension vào Chrome, extension sẽ tự kết nối.", "blue")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Time sync thread + reserve expire ticker
+        # Time sync thread
         threading.Thread(target=_time_sync_loop, daemon=True).start()
-        self.after(1000, self._tick_reserve_expire)
 
     # ── Build UI ──────────────────────────────────────────────────────────────
 
@@ -770,7 +837,7 @@ class App(ctk.CTk):
         # ── Right panel: Log ──
         right = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=16)
         right.grid(row=0, column=1, padx=(6,14), pady=14, sticky="nsew")
-        right.grid_rowconfigure(3, weight=1)  # log_box row = 3 (after cards)
+        right.grid_rowconfigure(1, weight=1)  # log_box row = 1 (cards removed)
         right.grid_columnconfigure(0, weight=1)
 
         # ── Header với clock realtime ─────────────────────────────────────────
@@ -793,15 +860,11 @@ class App(ctk.CTk):
                                         font=("Arial", 11), text_color=C_MUTED)
         self.lbl_status.grid(row=0, column=2, sticky="e")
 
-        # ── Reserve card ──────────────────────────────────────────────────────
-        self._build_reserve_card(right)
-        # ── Tokens card ───────────────────────────────────────────────────────
-        self._build_tokens_card(right)
 
         # ── Log box ───────────────────────────────────────────────────────────
         self.log_box = ctk.CTkTextbox(right, font=("Consolas", 11), state="disabled",
                                        fg_color=C_PANEL2, wrap="word")
-        self.log_box.grid(row=3, column=0, padx=12, pady=(0,12), sticky="nsew")
+        self.log_box.grid(row=1, column=0, padx=12, pady=(0,12), sticky="nsew")
 
         # Build tabs
         self._build_tab_seat()
@@ -827,202 +890,6 @@ class App(ctk.CTk):
         except Exception:
             pass
         self.after(100, self._tick_clock)
-
-    # ── Reserve card ─────────────────────────────────────────────────────────
-
-    def _build_reserve_card(self, parent):
-        card = ctk.CTkFrame(parent, fg_color=C_PANEL2, corner_radius=10,
-                            border_color=C_BORDER, border_width=1)
-        card.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
-        card.grid_columnconfigure(1, weight=1)
-
-        # Title row
-        ctk.CTkLabel(card, text="🎫  Đặt vé (Reserve)", font=("Arial", 11, "bold"),
-                     text_color=C_ACCENT).grid(row=0, column=0, columnspan=3,
-                                                padx=10, pady=(8, 2), sticky="w")
-        # Status
-        self.lbl_reserve_status = ctk.CTkLabel(
-            card, text="Chưa giữ được vé nào",
-            font=("Arial", 11), text_color=C_MUTED, anchor="w"
-        )
-        self.lbl_reserve_status.grid(row=1, column=0, columnspan=3,
-                                      padx=10, pady=(0, 2), sticky="ew")
-        # ID label + value
-        ctk.CTkLabel(card, text="Mã đặt vé:", font=("Arial", 10),
-                     text_color=C_MUTED, anchor="w").grid(
-            row=2, column=0, padx=(10, 4), pady=(0, 2), sticky="w")
-        self.lbl_reserve_id = ctk.CTkLabel(
-            card, text="—", font=("Consolas", 12, "bold"),
-            text_color=C_TEXT, anchor="w"
-        )
-        self.lbl_reserve_id.grid(row=2, column=1, padx=2, pady=(0, 2), sticky="ew")
-
-        self.btn_reserve_copy = ctk.CTkButton(
-            card, text="📋 Sao chép", width=80, height=24,
-            fg_color="#374151", hover_color="#4b5563",
-            font=("Arial", 10), command=self._copy_reserve_id, state="disabled"
-        )
-        self.btn_reserve_copy.grid(row=2, column=2, padx=(2, 8), pady=(0, 2), sticky="e")
-
-        # Details + expire
-        self.lbl_reserve_detail = ctk.CTkLabel(
-            card, text="", font=("Arial", 10), text_color=C_MUTED, anchor="w"
-        )
-        self.lbl_reserve_detail.grid(row=3, column=0, columnspan=3,
-                                      padx=10, pady=(0, 2), sticky="ew")
-
-        self.lbl_reserve_expire = ctk.CTkLabel(
-            card, text="", font=("Arial", 10), text_color="#facc15", anchor="w"
-        )
-        self.lbl_reserve_expire.grid(row=4, column=0, columnspan=2,
-                                      padx=10, pady=(0, 6), sticky="ew")
-
-        self.btn_reserve_open = ctk.CTkButton(
-            card, text="🌐 Mở checkout", width=110, height=24,
-            fg_color="#1d4ed8", hover_color="#1e40af",
-            font=("Arial", 10), command=self._open_reserve_url, state="disabled"
-        )
-        self.btn_reserve_open.grid(row=4, column=2, padx=(2, 8), pady=(0, 8), sticky="e")
-
-    def update_reserve_card(self):
-        if not _last_reserve:
-            return
-        r = _last_reserve
-        platform_raw = (r.get("platform") or "?").lower()
-        platform = "Ticketbox" if platform_raw == "ticketbox" else ("1Zone" if platform_raw == "1zone" else platform_raw.upper())
-        mode_raw = r.get("mode") or ""
-        mode_vi = {"zone": "chọn khu", "map": "chọn ghế cụ thể"}.get(mode_raw, mode_raw)
-        method_raw = r.get("method") or ""
-        method_vi = {"api-first": "API trực tiếp", "tier-p": "click UI"}.get(method_raw, method_raw)
-        dur_ms = r.get("durationMs")
-        ts_ms = r.get("capturedAt", 0)
-        ts_str = datetime.fromtimestamp(ts_ms/1000).strftime("%H:%M:%S") if ts_ms else "?"
-        dur_str = f" · {int(dur_ms)}ms" if dur_ms else ""
-
-        self.lbl_reserve_status.configure(
-            text=f"✅ {platform} · {mode_vi} · {method_vi}{dur_str} · lúc {ts_str}",
-            text_color="#22c55e"
-        )
-        the_id = r.get("bookingCode") or r.get("orderId") or "?"
-        self.lbl_reserve_id.configure(text=the_id)
-        self.btn_reserve_copy.configure(state="normal")
-
-        detail_parts = []
-        if r.get("showingId"):
-            detail_parts.append(f"suất diễn={r['showingId']}")
-        if r.get("zoneName"):
-            detail_parts.append(f"khu={r['zoneName']}")
-        if r.get("sectionName"):
-            detail_parts.append(f"khu vực={r['sectionName']}")
-        if r.get("seats"):
-            detail_parts.append(f"ghế={','.join(map(str, r['seats']))}")
-        if r.get("quantity"):
-            detail_parts.append(f"số lượng={r['quantity']}")
-        self.lbl_reserve_detail.configure(text=" · ".join(detail_parts))
-
-        if r.get("checkoutUrl"):
-            self.btn_reserve_open.configure(state="normal")
-
-    def _tick_reserve_expire(self):
-        """Update expire countdown mỗi 1s."""
-        if _last_reserve and _last_reserve.get("expireIn"):
-            ts_ms = _last_reserve.get("capturedAt", 0)
-            expire_ts = ts_ms / 1000 + _last_reserve["expireIn"]
-            remain = expire_ts - _now_synced_ms()
-            if remain > 0:
-                mins = int(remain // 60)
-                secs = int(remain % 60)
-                self.lbl_reserve_expire.configure(
-                    text=f"⏰ Vé sẽ hết hạn sau: {mins} phút {secs:02d} giây",
-                    text_color="#facc15" if remain > 60 else "#ef4444"
-                )
-            else:
-                self.lbl_reserve_expire.configure(text="⏰ VÉ ĐÃ HẾT HẠN", text_color="#ef4444")
-        self.after(1000, self._tick_reserve_expire)
-
-    def _copy_reserve_id(self):
-        if not _last_reserve:
-            return
-        the_id = _last_reserve.get("bookingCode") or _last_reserve.get("orderId") or ""
-        if the_id:
-            self.clipboard_clear()
-            self.clipboard_append(the_id)
-            self.add_log(f"📋 Đã sao chép mã đặt vé: {the_id}", "green")
-
-    def _open_reserve_url(self):
-        if not _last_reserve or not _last_reserve.get("checkoutUrl"):
-            return
-        try:
-            webbrowser.open(_last_reserve["checkoutUrl"])
-            self.add_log(f"🌐 Đang mở trang thanh toán...", "blue")
-        except Exception as e:
-            self.add_log(f"❌ Mở URL lỗi: {e}", "red")
-
-    # ── Tokens card ──────────────────────────────────────────────────────────
-
-    def _build_tokens_card(self, parent):
-        card = ctk.CTkFrame(parent, fg_color=C_PANEL2, corner_radius=10,
-                            border_color=C_BORDER, border_width=1)
-        card.grid(row=2, column=0, padx=12, pady=(0, 6), sticky="ew")
-        card.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(card, text="🔐  Phiên đăng nhập & Captcha", font=("Arial", 11, "bold"),
-                     text_color=C_ACCENT).grid(row=0, column=0,
-                                                padx=10, pady=(8, 2), sticky="w")
-
-        self.lbl_token_tb = ctk.CTkLabel(
-            card, text="Ticketbox: chưa nhận trạng thái", font=("Arial", 10),
-            text_color=C_MUTED, anchor="w"
-        )
-        self.lbl_token_tb.grid(row=1, column=0, padx=10, pady=(0, 2), sticky="ew")
-
-        self.lbl_token_captcha = ctk.CTkLabel(
-            card, text="Captcha đã giải: —", font=("Arial", 10),
-            text_color=C_MUTED, anchor="w"
-        )
-        self.lbl_token_captcha.grid(row=2, column=0, padx=10, pady=(0, 8), sticky="ew")
-
-    def update_tokens_card(self):
-        tb = _token_status.get("ticketbox") or {}
-        if not tb:
-            return
-        has = tb.get("hasAccessToken")
-        rem_ms = tb.get("accessTokenRemainingMs")
-        user = tb.get("userId")
-
-        if not has:
-            self.lbl_token_tb.configure(text="Ticketbox: ❌ chưa đăng nhập",
-                                         text_color="#ef4444")
-        else:
-            color = "#22c55e"
-            if rem_ms is None:
-                rem_str = "không xác định"
-            elif rem_ms > 30000:
-                rem_str = f"còn {rem_ms//1000} giây ✅"
-                color = "#22c55e"
-            elif rem_ms > 0:
-                rem_str = f"còn {rem_ms//1000} giây ⚠️ (sắp hết)"
-                color = "#facc15"
-            else:
-                rem_str = "❌ ĐÃ HẾT HẠN — reload tab để frontend refresh"
-                color = "#ef4444"
-            text = f"Token Ticketbox: {rem_str}"
-            if user:
-                text += f"  ·  user {user}"
-            self.lbl_token_tb.configure(text=text, text_color=color)
-
-        cnt = tb.get("captchaCount", 0)
-        showings = tb.get("captchaShowings") or []
-        if cnt == 0:
-            self.lbl_token_captcha.configure(
-                text="Captcha: chưa giải cho suất diễn nào",
-                text_color=C_MUTED)
-        else:
-            min_rem = min((s.get("remainingMs", 0) for s in showings), default=0)
-            mins = int(min_rem // 60000)
-            text = f"Captcha đã giải: {cnt} suất diễn  ·  gần nhất hết sau {mins} phút"
-            color = "#22c55e" if mins > 5 else "#facc15"
-            self.lbl_token_captcha.configure(text=text, text_color=color)
 
     # ── Tab Chọn Vé ──────────────────────────────────────────────────────────
 
@@ -1075,8 +942,8 @@ class App(ctk.CTk):
         self.dynamic_frame.grid_columnconfigure(0, weight=1)
 
         # Số lượng + bật bot
-        ctk.CTkLabel(f, text="Số lượng vé", font=("Arial", 11), text_color=C_MUTED
-                     ).grid(row=6, column=0, padx=16, pady=(8,0), sticky="w")
+        self.lbl_qty = ctk.CTkLabel(f, text="Số lượng vé", font=("Arial", 11), text_color=C_MUTED)
+        self.lbl_qty.grid(row=6, column=0, padx=16, pady=(8,0), sticky="w")
         self.inp_qty = ctk.CTkEntry(f, placeholder_text="VD: 2", font=("Arial", 12))
         self.inp_qty.grid(row=7, column=0, padx=16, pady=(2,10), sticky="ew")
 
@@ -1089,13 +956,6 @@ class App(ctk.CTk):
         )
         self.chk_allow_partial.grid(row=8, column=0, padx=16, pady=(0,4), sticky="w")
 
-        self.var_enabled = ctk.BooleanVar(value=False)
-        self.chk_enabled = ctk.CTkCheckBox(
-            f, text="Bật bot tự động", variable=self.var_enabled,
-            font=("Arial", 12, "bold"), text_color=C_OK,
-            command=self._on_toggle_bot
-        )
-        self.chk_enabled.grid(row=9, column=0, padx=16, pady=(4,16), sticky="w")
 
     def _build_dynamic_zone(self):
         for w in self.dynamic_frame.winfo_children():
@@ -1138,6 +998,47 @@ class App(ctk.CTk):
         # Thêm 1 row mặc định
         self._add_seat_map_row()
 
+    def _build_dynamic_ctiket(self):
+        """UI chọn zone Ctiket: mỗi dòng có Tên zone + Số lượng riêng."""
+        for w in self.dynamic_frame.winfo_children():
+            w.destroy()
+        self._ctiket_zone_rows = []
+
+        ctk.CTkLabel(self.dynamic_frame, text="Ưu tiên khu vực",
+                     font=("Arial", 11), text_color=C_MUTED
+                     ).grid(row=0, column=0, padx=16, pady=(0,0), sticky="w")
+        ctk.CTkLabel(self.dynamic_frame,
+                     text="Bot thử theo thứ tự từ trên xuống — mỗi khu có số lượng riêng",
+                     font=("Arial", 10), text_color="#475569", wraplength=320
+                     ).grid(row=1, column=0, padx=16, pady=(0,4), sticky="w")
+
+        self.ctiket_rows_frame = ctk.CTkFrame(self.dynamic_frame, fg_color="transparent")
+        self.ctiket_rows_frame.grid(row=2, column=0, padx=16, pady=0, sticky="ew")
+        self.ctiket_rows_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkButton(self.dynamic_frame, text="＋  Thêm ưu tiên",
+                      fg_color=C_BORDER, hover_color="#1e293b",
+                      text_color=C_MUTED, font=("Arial", 11),
+                      command=self._add_ctiket_zone_row, height=30
+                      ).grid(row=3, column=0, padx=16, pady=(6,4), sticky="w")
+
+        self._add_ctiket_zone_row()
+
+    def _add_ctiket_zone_row(self, val=None):
+        row = CtiketZoneRow(self.ctiket_rows_frame, on_delete=self._refresh_ctiket_rows)
+        row.grid(row=len(self._ctiket_zone_rows), column=0, pady=(0,4), sticky="ew")
+        if val:
+            row.set_value(val)
+        self._ctiket_zone_rows.append(row)
+
+    def _refresh_ctiket_rows(self):
+        self._ctiket_zone_rows = [
+            w for w in self.ctiket_rows_frame.winfo_children()
+            if isinstance(w, CtiketZoneRow)
+        ]
+        for i, row in enumerate(self._ctiket_zone_rows):
+            row.grid(row=i, column=0, pady=(0,4), sticky="ew")
+
     def _add_seat_map_row(self, val=None):
         row = SeatMapRow(self.seat_rows_frame, on_delete=self._refresh_seat_rows)
         row.grid(row=len(self._seat_map_rows), column=0, pady=(0,4), sticky="ew")
@@ -1164,13 +1065,17 @@ class App(ctk.CTk):
         platform = self.sel_platform.get()
         if platform == "Ctiket":
             # Ctiket chỉ có seat_zone (GA theo khu, không có seatmap ghế cụ thể)
-            # → ẩn dropdown mode, ép luôn về seat_zone
+            # → ẩn dropdown mode + ô số lượng chung (mỗi zone có qty riêng)
             self.sel_mode.set(MODE_LABEL_ZONE)
             self.lbl_mode.grid_remove()
             self.sel_mode.grid_remove()
+            self.lbl_qty.grid_remove()
+            self.inp_qty.grid_remove()
         else:
             self.lbl_mode.grid()
             self.sel_mode.grid()
+            self.lbl_qty.grid()
+            self.inp_qty.grid()
 
         self._load_seat_config_for(platform)
 
@@ -1178,23 +1083,34 @@ class App(ctk.CTk):
         """Lưu phần auto_seat[platform] hiện tại trên UI vào self._cfg (chưa ghi file)."""
         pk = _PLATFORM_KEY_MAP.get(platform, "1zone")
         mode = "seat_zone" if platform == "Ctiket" else _label_to_mode(self.sel_mode.get())
-        try:
-            qty = int(self.inp_qty.get().strip())
-        except Exception:
-            qty = 1
 
         seat_cfg = self._cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
         seat_cfg["seat_mode"]     = mode
-        seat_cfg["quantity"]      = qty
         seat_cfg["allow_partial"] = self.var_allow_partial.get()
-        seat_cfg["enabled"]       = self.var_enabled.get()
 
-        if mode == "seat_zone":
+        if platform == "Ctiket":
+            self._refresh_ctiket_rows()
+            items = [r.get_value() for r in self._ctiket_zone_rows if r.get_value()]
+            seat_cfg["items"] = items
+            # Backward compat: lưu thêm zone_priority để extension cũ không bị lỗi
+            seat_cfg["zone_priority"] = [i["zone"] for i in items]
+            seat_cfg["quantity"] = sum(i["quantity"] for i in items)
+        elif mode == "seat_zone":
+            try:
+                qty = int(self.inp_qty.get().strip())
+            except Exception:
+                qty = 1
+            seat_cfg["quantity"] = qty
             zones = [z.strip() for z in self.txt_priority.get("1.0", "end").splitlines() if z.strip()]
             seat_cfg["zone_priority"]    = zones
             seat_cfg["priority_targets"] = zones
             seat_cfg["seat_map_priorities"] = []
         else:
+            try:
+                qty = int(self.inp_qty.get().strip())
+            except Exception:
+                qty = 1
+            seat_cfg["quantity"] = qty
             self._refresh_seat_rows()
             priorities = [r.get_value() for r in self._seat_map_rows if r.get_value()]
             seat_cfg["seat_map_priorities"] = priorities
@@ -1209,7 +1125,18 @@ class App(ctk.CTk):
         mode = as_.get("seat_mode", "seat_zone")
         self.sel_mode.set(_mode_to_label(mode))
 
-        if mode == "seat_zone":
+        if platform == "Ctiket":
+            self._build_dynamic_ctiket()
+            items = as_.get("items") or []
+            for w in self.ctiket_rows_frame.winfo_children():
+                w.destroy()
+            self._ctiket_zone_rows = []
+            if items:
+                for item in items:
+                    self._add_ctiket_zone_row(item)
+            else:
+                self._add_ctiket_zone_row()
+        elif mode == "seat_zone":
             self._build_dynamic_zone()
             zones = as_.get("zone_priority") or as_.get("priority_targets") or []
             self.txt_priority.delete("1.0", "end")
@@ -1226,9 +1153,9 @@ class App(ctk.CTk):
             else:
                 self._add_seat_map_row()
 
-        _set(self.inp_qty, str(as_.get("quantity", 1)))
+        if platform != "Ctiket":
+            _set(self.inp_qty, str(as_.get("quantity", 1)))
         self.var_allow_partial.set(bool(as_.get("allow_partial", False)))
-        self.var_enabled.set(bool(as_.get("enabled", False)))
 
     def _style_platform_tabs(self):
         for p, btn in self._platform_buttons.items():
@@ -1249,9 +1176,13 @@ class App(ctk.CTk):
         if platform == "Ctiket":
             self.lbl_mode.grid_remove()
             self.sel_mode.grid_remove()
+            self.lbl_qty.grid_remove()
+            self.inp_qty.grid_remove()
         else:
             self.lbl_mode.grid()
             self.sel_mode.grid()
+            self.lbl_qty.grid()
+            self.inp_qty.grid()
 
         self._load_seat_config_for(platform)
 
@@ -1269,11 +1200,12 @@ class App(ctk.CTk):
         f.grid_columnconfigure(0, weight=1)
         self._tab_info_frame = f
 
+        # ── 4 trường cố định ──────────────────────────────────────────────────
         fields = [
-            ("Họ tên", "inp_name", "Nguyễn Văn A"),
-            ("Số điện thoại", "inp_phone", "09xxxxxxxx"),
-            ("Email", "inp_email", "email@example.com"),
-            ("Địa chỉ", "inp_address", "Biên Hòa, Đồng Nai"),
+            ("Họ tên",        "inp_name",    "Nguyễn Văn A"),
+            ("Số điện thoại", "inp_phone",   "09xxxxxxxx"),
+            ("Email",         "inp_email",   "email@example.com"),
+            ("Địa chỉ",       "inp_address", "Biên Hòa, Đồng Nai"),
         ]
         for i, (label, attr, placeholder) in enumerate(fields):
             ctk.CTkLabel(f, text=label, font=("Arial", 11), text_color=C_MUTED
@@ -1281,6 +1213,123 @@ class App(ctk.CTk):
             inp = ctk.CTkEntry(f, placeholder_text=placeholder, font=("Arial", 12))
             inp.grid(row=i*2+1, column=0, padx=16, pady=(2,0), sticky="ew")
             setattr(self, attr, inp)
+
+        # ── Separator + header custom fields ──────────────────────────────────
+        ROW_SEP = len(fields) * 2
+        ctk.CTkLabel(f, text="Trường tùy chỉnh", font=("Arial", 11, "bold"),
+                     text_color=C_MUTED).grid(
+            row=ROW_SEP, column=0, padx=16, pady=(14, 0), sticky="w")
+
+        # Nút Scan Fields
+        btn_scan = ctk.CTkButton(
+            f, text="🔍 Scan Fields", width=110, height=26,
+            font=("Arial", 11), fg_color=C_BORDER, text_color=C_TEXT,
+            hover_color="#334155",
+            command=self._scan_fields,
+        )
+        btn_scan.grid(row=ROW_SEP, column=0, padx=16, pady=(14, 0), sticky="e")
+        self._btn_scan = btn_scan
+
+        # Frame chứa các custom field rows (scrollable nếu nhiều)
+        self._custom_frame = ctk.CTkFrame(f, fg_color="transparent")
+        self._custom_frame.grid(row=ROW_SEP+1, column=0, padx=0, pady=(4,8), sticky="ew")
+        self._custom_frame.grid_columnconfigure(0, weight=1)
+        self._custom_rows = []  # list of (keyword_entry, value_entry, row_frame)
+
+    def _add_custom_field_row(self, keyword="", value=""):
+        """Thêm 1 row custom field vào _custom_frame."""
+        idx = len(self._custom_rows)
+        row_f = ctk.CTkFrame(self._custom_frame, fg_color="#1e293b", corner_radius=6)
+        row_f.grid(row=idx, column=0, padx=16, pady=(0, 4), sticky="ew")
+        row_f.grid_columnconfigure(0, weight=2)
+        row_f.grid_columnconfigure(1, weight=3)
+
+        kw_inp = ctk.CTkEntry(row_f, placeholder_text="keyword (vd: cmnd)", font=("Arial", 11),
+                              width=110, fg_color="#0f172a")
+        kw_inp.grid(row=0, column=0, padx=(8,4), pady=6, sticky="ew")
+        if keyword:
+            kw_inp.insert(0, keyword)
+
+        val_inp = ctk.CTkEntry(row_f, placeholder_text="giá trị", font=("Arial", 11),
+                               fg_color="#0f172a")
+        val_inp.grid(row=0, column=1, padx=(0,4), pady=6, sticky="ew")
+        if value:
+            val_inp.insert(0, value)
+
+        def _remove(rf=row_f, row_tuple=None):
+            rf.destroy()
+            self._custom_rows = [(k,v,f) for k,v,f in self._custom_rows if f != rf]
+        btn_del = ctk.CTkButton(row_f, text="✕", width=26, height=26,
+                                font=("Arial", 11), fg_color="#7f1d1d",
+                                hover_color="#991b1b", command=_remove)
+        btn_del.grid(row=0, column=2, padx=(0,6), pady=6)
+
+        self._custom_rows.append((kw_inp, val_inp, row_f))
+
+    def _scan_fields(self):
+        """Bật pending flag → extension poll thấy → scan DOM → POST kết quả về."""
+        global _scan_pending, _scan_result
+        _scan_pending = True
+        _scan_result  = None
+        _scan_event.clear()
+        self._btn_scan.configure(text="⏳ Đang scan...", state="disabled")
+        self.add_log("🔍 Đang scan fields trên trang...", "blue")
+
+        def _wait():
+            got = _scan_event.wait(timeout=8)
+            self.after(0, lambda: self._on_scan_result(_scan_result if got else None))
+
+        threading.Thread(target=_wait, daemon=True).start()
+
+    def _on_scan_result(self, fields):
+        """Callback khi extension trả về list fields — hiện dialog chọn."""
+        self._btn_scan.configure(text="🔍 Scan Fields", state="normal")
+        if not fields:
+            self.add_log("⚠️ Không tìm thấy form trên trang (hoặc timeout).", "yellow")
+            return
+
+        self.add_log(f"✅ Tìm thấy {len(fields)} field(s) trên trang.", "green")
+
+        # Dialog chọn field
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Chọn field để thêm")
+        dlg.geometry("420x380")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text="Chọn field muốn tự động điền:",
+                     font=("Arial", 12, "bold")).pack(padx=16, pady=(14,6), anchor="w")
+
+        scroll = ctk.CTkScrollableFrame(dlg, height=220)
+        scroll.pack(fill="both", expand=True, padx=12, pady=4)
+        scroll.grid_columnconfigure(0, weight=1)
+
+        selected = {}  # idx → BooleanVar
+        for i, fld in enumerate(fields):
+            label_txt = fld.get("label") or fld.get("placeholder") or fld.get("name") or f"field_{i}"
+            hint = " | ".join(filter(None, [
+                fld.get("label"), fld.get("placeholder"),
+                f'name={fld["name"]}' if fld.get("name") else None,
+                f'id={fld["id"]}' if fld.get("id") else None,
+            ]))[:60]
+            var = ctk.BooleanVar(value=False)
+            selected[i] = (var, fld)
+            cb = ctk.CTkCheckBox(scroll, text=hint or label_txt,
+                                 variable=var, font=("Arial", 11))
+            cb.grid(row=i, column=0, padx=8, pady=3, sticky="w")
+
+        def _confirm():
+            for i, (var, fld) in selected.items():
+                if var.get():
+                    # Keyword = label hoặc placeholder hoặc name, lowercase
+                    kw = (fld.get("label") or fld.get("placeholder") or fld.get("name") or "").lower().strip()
+                    self._add_custom_field_row(keyword=kw, value="")
+            dlg.destroy()
+            self.add_log("💡 Đã thêm field — nhập giá trị rồi bấm Lưu.", "blue")
+
+        ctk.CTkButton(dlg, text="✅ Thêm field đã chọn", command=_confirm,
+                      font=("Arial", 12), fg_color=C_ACCENT,
+                      text_color="#0f172a").pack(pady=12)
 
     # ── Switch tab ────────────────────────────────────────────────────────────
 
@@ -1306,6 +1355,14 @@ class App(ctk.CTk):
         _set(self.inp_email, cfg.get("email", ""))
         _set(self.inp_address, cfg.get("address", ""))
 
+        # Load custom fields — xóa rows cũ rồi tạo lại
+        for _, _, rf in self._custom_rows:
+            try: rf.destroy()
+            except Exception: pass
+        self._custom_rows = []
+        for fld in cfg.get("custom_fields", []):
+            self._add_custom_field_row(fld.get("keyword", ""), fld.get("value", ""))
+
         platform = cfg.get("active_platform", "1Zone")
         self.sel_platform.set(platform)
         self._prev_platform = platform
@@ -1325,6 +1382,13 @@ class App(ctk.CTk):
         cfg["email"]   = self.inp_email.get().strip()
         cfg["address"] = self.inp_address.get().strip()
 
+        # Save custom fields
+        cfg["custom_fields"] = [
+            {"keyword": kw.get().strip(), "value": val.get().strip()}
+            for kw, val, _ in self._custom_rows
+            if kw.get().strip()
+        ]
+
         # Convert label → internal mode key
         platform = self.sel_platform.get()
         cfg["active_platform"] = platform
@@ -1337,16 +1401,22 @@ class App(ctk.CTk):
 
         seat_cfg = cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
         seat_cfg["seat_mode"]     = mode
-        seat_cfg["quantity"]      = qty
         seat_cfg["allow_partial"] = self.var_allow_partial.get()
-        seat_cfg["enabled"]       = self.var_enabled.get()
 
-        if mode == "seat_zone":
+        if platform == "Ctiket":
+            self._refresh_ctiket_rows()
+            items = [r.get_value() for r in self._ctiket_zone_rows if r.get_value()]
+            seat_cfg["items"] = items
+            seat_cfg["zone_priority"] = [i["zone"] for i in items]
+            seat_cfg["quantity"] = sum(i["quantity"] for i in items)
+        elif mode == "seat_zone":
+            seat_cfg["quantity"] = qty
             zones = [z.strip() for z in self.txt_priority.get("1.0", "end").splitlines() if z.strip()]
             seat_cfg["zone_priority"]    = zones
             seat_cfg["priority_targets"] = zones
             seat_cfg["seat_map_priorities"] = []
         else:
+            seat_cfg["quantity"] = qty
             self._refresh_seat_rows()
             priorities = [r.get_value() for r in self._seat_map_rows if r.get_value()]
             seat_cfg["seat_map_priorities"] = priorities
@@ -1357,15 +1427,8 @@ class App(ctk.CTk):
         self._cfg = cfg
         self.add_log(f"💾 Đã lưu config cho {platform}.", "green")
 
-    def _on_toggle_bot(self):
-        self._save_config()
-        self._update_status()
-
     def _update_status(self):
-        if self.var_enabled.get():
-            self.lbl_status.configure(text="🟢  Bot đang bật", text_color=C_OK)
-        else:
-            self.lbl_status.configure(text="⏸  Bot tắt", text_color=C_MUTED)
+        self.lbl_status.configure(text="🟢  Sẵn sàng", text_color=C_OK)
 
     # ── Log ───────────────────────────────────────────────────────────────────
 
