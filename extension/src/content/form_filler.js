@@ -1,6 +1,112 @@
 // src/content/form_filler.js
 // Convert từ form_fillers.py — giữ nguyên toàn bộ logic
 
+// ── Scan Fields ───────────────────────────────────────────────────────────────
+// Quét DOM tìm tất cả input/textarea/select + label/placeholder/name/id
+// Trả về list để Desktop hiển thị cho user chọn keyword
+
+function svpScanFields() {
+  const results = [];
+  const seen = new Set();
+
+  const inputs = document.querySelectorAll("input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='checkbox']):not([type='radio']), textarea, select");
+
+  for (const el of inputs) {
+    // Tìm label gần nhất
+    let labelText = "";
+    if (el.id) {
+      const lbl = document.querySelector(`label[for="${el.id}"]`);
+      if (lbl) labelText = lbl.innerText?.trim() || "";
+    }
+    if (!labelText) {
+      // Label wrap
+      const parent = el.closest("label");
+      if (parent) labelText = parent.innerText?.trim().replace(el.value, "").trim() || "";
+    }
+    if (!labelText) {
+      // Label sibling trước đó
+      let prev = el.previousElementSibling;
+      while (prev) {
+        if (prev.tagName === "LABEL" || prev.matches("span,div,p")) {
+          labelText = prev.innerText?.trim() || "";
+          if (labelText) break;
+        }
+        prev = prev.previousElementSibling;
+      }
+    }
+
+    const placeholder = el.getAttribute("placeholder") || "";
+    const name        = el.getAttribute("name") || "";
+    const id          = el.getAttribute("id") || "";
+
+    // Bỏ qua nếu không có gợi ý gì
+    if (!labelText && !placeholder && !name && !id) continue;
+
+    // Dedup theo key
+    const key = `${labelText}|${placeholder}|${name}|${id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    results.push({ label: labelText, placeholder, name, id });
+  }
+
+  return results;
+}
+
+// ── Fill custom fields (dùng chung 3 platform) ────────────────────────────────
+
+async function fillCustomFields(cfg) {
+  const customFields = cfg?.custom_fields;
+  svpLog(`🔍 fillCustomFields: custom_fields=${JSON.stringify(customFields)}`, "blue");
+  if (!customFields || !customFields.length) {
+    svpLog("⚠️ Không có custom_fields trong config", "yellow");
+    return;
+  }
+
+  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+  const nativeTextSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+
+  const inputs = document.querySelectorAll(
+    "input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='checkbox']):not([type='radio']), textarea"
+  );
+
+  for (const field of customFields) {
+    const kw = (field.keyword || "").toLowerCase().trim();
+    const val = field.value || "";
+    if (!kw || !val) continue;
+
+    for (const el of inputs) {
+      // Gom label + placeholder + name + id thành 1 chuỗi để so
+      let labelText = "";
+      if (el.id) {
+        const lbl = document.querySelector(`label[for="${el.id}"]`);
+        if (lbl) labelText = lbl.innerText?.trim() || "";
+      }
+      const haystack = [
+        labelText,
+        el.getAttribute("placeholder") || "",
+        el.getAttribute("name") || "",
+        el.getAttribute("id") || "",
+      ].join(" ").toLowerCase();
+
+      if (!haystack.includes(kw)) continue;
+
+      try {
+        if (el.tagName === "TEXTAREA") {
+          if (nativeTextSetter) nativeTextSetter.call(el, val);
+          else el.value = val;
+        } else {
+          nativeSetter.call(el, val);
+        }
+        el.dispatchEvent(new Event("input",  { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        svpLog(`✅ Custom field [${kw}] → "${val}"`, "green");
+      } catch {}
+      break; // Tìm thấy 1 field là đủ, không điền trùng
+    }
+  }
+}
+
 // ── 1Zone ────────────────────────────────────────────────────────────────────
 
 async function fill1Zone(cfg) {
@@ -50,6 +156,7 @@ async function fill1Zone(cfg) {
 
     window.dispatchEvent(new Event("resize"));
     svpLog("✅ Đã điền form 1Zone", "green");
+    await fillCustomFields(cfg);
     return true;
   } catch(e) {
     svpLog(`❌ fill_1zone lỗi: ${e.message}`, "red");
@@ -117,9 +224,64 @@ async function fillTicketbox(cfg) {
     }
 
     svpLog("✅ Đã điền form Ticketbox", "green");
+    await fillCustomFields(cfg);
     return true;
   } catch(e) {
     svpLog(`❌ fill_ticketbox lỗi: ${e.message}`, "red");
+    return false;
+  }
+}
+
+// ── Ctiket ────────────────────────────────────────────────────────────────────
+
+async function fillCtiket(cfg) {
+  svpLog("📝 Điền form Ctiket...", "blue");
+  const name  = cfg.name  || "";
+  const phone = cfg.phone || "";
+  const email = cfg.email || "";
+
+  try {
+    await waitForElement("input, textarea", 15000);
+  } catch {
+    svpLog("❌ Form Ctiket chưa load (timeout 15s)", "red");
+    return false;
+  }
+
+  try {
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    const inputs = Array.from(document.querySelectorAll("input:not([type='hidden']):not([type='submit']):not([type='button']), textarea"));
+
+    for (const el of inputs) {
+      let labelText = "";
+      if (el.id) {
+        const lbl = document.querySelector(`label[for="${el.id}"]`);
+        if (lbl) labelText = lbl.innerText?.trim() || "";
+      }
+      const haystack = [
+        labelText,
+        el.getAttribute("placeholder") || "",
+        el.getAttribute("name") || "",
+      ].join(" ").toLowerCase();
+
+      let val = null;
+      if (["tên","họ tên","full name","name"].some(k => haystack.includes(k))) val = name;
+      else if (["điện thoại","phone","mobile","số điện thoại"].some(k => haystack.includes(k))) val = phone;
+      else if (haystack.includes("email")) val = email;
+
+      if (val !== null) {
+        try {
+          nativeSetter.call(el, val);
+          el.dispatchEvent(new Event("input",  { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        } catch {}
+      }
+    }
+
+    svpLog("✅ Đã điền form Ctiket", "green");
+    await fillCustomFields(cfg);
+    return true;
+  } catch(e) {
+    svpLog(`❌ fill_ctiket lỗi: ${e.message}`, "red");
     return false;
   }
 }
@@ -128,8 +290,9 @@ async function fillTicketbox(cfg) {
 
 async function autoFillForm(cfg) {
   const platform = detectPlatform();
-  if (platform === "1Zone") return fill1Zone(cfg);
+  if (platform === "1Zone")     return fill1Zone(cfg);
   if (platform === "Ticketbox") return fillTicketbox(cfg);
+  if (platform === "Ctiket")    return fillCtiket(cfg);
   svpLog("⚠️ Không nhận diện được platform để fill form", "yellow");
   return false;
 }

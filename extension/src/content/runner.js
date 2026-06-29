@@ -25,7 +25,6 @@ const _HUNT_FLAG_KEY = "__svp_hunt_done__";
 const _HUNT_FLAG_TTL = 90 * 60 * 1000; // 90 phút — đủ cover queue dài nhất
 
 let _cfg = null;
-let _enabled = false;
 let _running = false;
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -36,8 +35,7 @@ async function initConfig() {
       if (res && res.config) {
         _cfg = res.config;
         const _initPlatform = res.config?.active_platform || "1Zone";
-        _enabled = !!_getPlatformCfg(res.config, _initPlatform)?.enabled;
-        svpLog(`⚙️ Config loaded | platform=${_initPlatform} | enabled=${_enabled}`, "blue");
+        svpLog(`⚙️ Config loaded | platform=${_initPlatform}`, "blue");
       }
       resolve(_cfg);
     });
@@ -62,16 +60,7 @@ function checkAndClearHuntFlag() {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "CONFIG_UPDATE") {
-    const wasEnabled = _enabled;
     _cfg = msg.config;
-    const _updPlatform = msg.config?.active_platform || "1Zone";
-    _enabled = !!_getPlatformCfg(msg.config, _updPlatform)?.enabled;
-    if (!wasEnabled && _enabled) {
-      svpLog("🟢 Bot được bật — bắt đầu check trang...", "green");
-      maybeRun();
-    } else if (wasEnabled && !_enabled) {
-      svpLog("⏸ Bot tắt", "gray");
-    }
     sendResponse({ ok: true });
     return;
   }
@@ -99,6 +88,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "FILL_FORM_NOW") {
     if (!_cfg) { initConfig().then(() => runFillForm()); }
     else runFillForm();
+    sendResponse({ ok: true });
+    return;
+  }
+  if (msg.type === "SCAN_FIELDS") {
+    const fields = svpScanFields();
+    sendResponse({ ok: true, fields });
+    return;
+  }
+  if (msg.type === "PING") {
     sendResponse({ ok: true });
     return;
   }
@@ -200,7 +198,7 @@ async function startHunt(autoSeat = true) {
     if (autoSeat) setHuntFlag();
     if (platform === "1Zone") await hunt1Zone(_cfg);
     else if (platform === "Ticketbox") await huntTicketbox(_cfg);
-    else if (platform === "Ctiket") await huntCtiket(_cfg);
+    else if (platform === "Ctiket") await huntCtiket(_cfg, autoSeat);
   } catch (e) {
     svpLog(`❌ Hunt lỗi: ${e.message}`, "red");
     if (autoSeat) sessionStorage.removeItem(_HUNT_FLAG_KEY);
@@ -350,16 +348,12 @@ function showSeatRetryToast(mode, attempt) {
 async function maybeRun(force = false) {
   if (_running) { svpLog("⏳ Bot đang chạy, bỏ qua", "gray"); return; }
 
-  if (!_cfg) { await initConfig(); }
+  // Luôn reload config để đảm bảo custom_fields và settings mới nhất
+  await initConfig();
   if (!_cfg) { svpLog("❌ Không lấy được config từ App", "red"); return; }
 
   const platform = detectPlatform();
   if (!platform) return;
-
-  // Kiem tra enabled theo platform cua trang hien tai (khong phu thuoc active_platform)
-  const pagePlatformCfg = _getPlatformCfg(_cfg, platform);
-  const platformEnabled = !!pagePlatformCfg?.enabled;
-  if (!platformEnabled && !force) return;
 
   const pageType = detectPageType();
   const _pcfg = _getPlatformCfg(_cfg, platform);
@@ -378,9 +372,11 @@ async function maybeRun(force = false) {
     return;
   }
 
-  // Ctiket queue page: khoi dong queue_watcher chi khi co hunt flag
+  // Ctiket queue page: khoi dong queue_watcher neu co hunt flag HOAC force=true
+  // NOTE: checkAndClearHuntFlag() xoa flag truoc khi goi maybeRun(true),
+  // nen phai dung tham so force de bien nguon thay vi doc lai sessionStorage
   if (pageType === "queue_ctiket") {
-    const huntActive = !!sessionStorage.getItem(_HUNT_FLAG_KEY);
+    const huntActive = force || !!sessionStorage.getItem(_HUNT_FLAG_KEY);
     if (huntActive) {
       svpLog("⏳ Detect trang Ctiket queue — khởi động queue_watcher...", "blue");
       watchLoop?.();
@@ -472,7 +468,8 @@ function watchNavigation() {
       // Nếu navigate sang checkout → điền form luôn, không qua maybeRun
       if (location.href.includes("/checkout") || location.href.includes("/order/") || location.href.includes("/question-form")) {
         setTimeout(async () => {
-          if (!_cfg) await initConfig();
+          // Luôn reload config để lấy custom_fields mới nhất
+          await initConfig();
           if (!_cfg) return;
           svpLog("📝 Tự động điền form checkout...", "blue");
           try {
@@ -485,7 +482,9 @@ function watchNavigation() {
       }
 
       // Ctiket SPA nav sang /queue — goi watchLoop chi khi co hunt flag
-      if (/\/buy\/[a-zA-Z0-9]+\/queue/.test(location.pathname)) {
+      // NOTE: flag co the da bi clear boi checkAndClearHuntFlag() nen
+      // dat hunt flag moi truoc khi watchLoop check (chong mat flag)
+      if (/\/buy\/[a-zA-Z0-9_-]+\/queue/.test(location.pathname)) {
         const huntActive = !!sessionStorage.getItem(_HUNT_FLAG_KEY);
         if (huntActive) {
           svpLog("⏳ SPA nav → Ctiket queue — khởi động queue_watcher...", "blue");
@@ -495,9 +494,12 @@ function watchNavigation() {
       }
 
       // Ctiket SPA nav sang /buy (sau khi click button tu queue)
-      // Chi force run neu co hunt flag — tranh tu chay khi user vao trang thu cong
-      if (/\/buy\/[a-zA-Z0-9]+/.test(location.pathname) && !/queue/.test(location.pathname)) {
-        const huntActive = !!sessionStorage.getItem(_HUNT_FLAG_KEY);
+      // Uu tien check window.__svp_queue_passed__ (set boi queue_watcher khi click button)
+      // vi sessionStorage flag da bi clear truoc do boi checkAndClearHuntFlag()
+      if (/\/buy\/[a-zA-Z0-9_-]+/.test(location.pathname) && !/queue/.test(location.pathname)) {
+        const queuePassed = !!window.__svp_queue_passed__;
+        if (queuePassed) window.__svp_queue_passed__ = false;  // clear sau khi dung
+        const huntActive = queuePassed || !!sessionStorage.getItem(_HUNT_FLAG_KEY);
         setTimeout(() => maybeRun(huntActive), 1500);
         return;
       }
@@ -518,6 +520,12 @@ function watchNavigation() {
   const huntDone = checkAndClearHuntFlag();
   if (huntDone) {
     svpLog("🎯 Hunt flag detected — tự động chạy seat selector...", "green");
+    // Nếu đang ở trang queue, đặt lại flag để watchNavigation vẫn có thể
+    // kích hoạt watchLoop khi SPA nav sang /buy (sau khi click button queue)
+    const currPageType = detectPageType();
+    if (currPageType === "queue_ctiket") {
+      setHuntFlag();  // re-set để watchNavigation /buy detect được
+    }
     await sleep(1000);
     await maybeRun(true);
     return;
@@ -536,11 +544,9 @@ function watchNavigation() {
     return;
   }
 
-  if (_enabled) {
-    svpLog("🟢 Bot đang bật, check trang...", "green");
-    await sleep(800);
-    maybeRun();
-  }
+  svpLog("🟢 Sẵn sàng, check trang...", "green");
+  await sleep(800);
+  maybeRun();
 })();
 
 } // end __SVP_INJECTED__ guard

@@ -6,7 +6,16 @@
 // MAIN world lang nghe, cho grecaptcha san sang, tra ket qua qua "svp:captchaResult"
 
 (function () {
-  const SITE_KEY = "6Leg798rAAAAAOQwZrZvhwtxUCvmXkNk3bGbexv0";
+  // Auto-detect site key từ script tag trang đang load
+  // Fallback về key cũ nếu không tìm thấy
+  function detectSiteKey() {
+    const el = document.querySelector('script[src*="recaptcha/api.js?render="]');
+    if (el) {
+      const m = el.src.match(/render=([^&]+)/);
+      if (m && m[1]) return m[1];
+    }
+    return "6LekYDEtAAAAAEbSW0E_MVzD3bjVwuNxz1lAHYpS";
+  }
 
   function waitForGrecaptcha(timeout) {
     return new Promise((resolve, reject) => {
@@ -35,9 +44,11 @@
       .then(() => new Promise((resolve, reject) => {
         clearTimeout(globalTimeout);
         const t = setTimeout(() => reject(new Error("grecaptcha.execute timeout")), 10000);
+        const siteKey = detectSiteKey();
+        console.log("[SVP] ctiket captcha siteKey:", siteKey);
         grecaptcha.ready(() => {
           clearTimeout(t);
-          grecaptcha.execute(SITE_KEY, { action: "submit" })
+          grecaptcha.execute(siteKey, { action: "submit" })
             .then(resolve).catch(reject);
         });
       }))

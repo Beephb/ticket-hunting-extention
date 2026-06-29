@@ -333,6 +333,32 @@ async function pollConfig() {
       }).catch(() => {});
     }
   }
+
+  // ── Scan fields poll ───────────────────────────────────────────────────────
+  // Nếu desktop đang chờ scan → lấy tab active → gửi SCAN_FIELDS → POST kết quả về
+  try {
+    if (_appOnline) {
+      const pollRes = await apiFetch("/scan-fields/poll", { signal: AbortSignal.timeout(1500) });
+      if (pollRes.ok) {
+        const d = await pollRes.json();
+        if (d?.pending) {
+          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (activeTab?.id) {
+            chrome.tabs.sendMessage(activeTab.id, { type: "SCAN_FIELDS" }, async (resp) => {
+              if (chrome.runtime.lastError || !resp?.fields) return;
+              await apiFetch("/scan-fields", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ fields: resp.fields }),
+                signal: AbortSignal.timeout(2000),
+              }).catch(() => {});
+            });
+          }
+        }
+      }
+    }
+  } catch {}
+
   setTimeout(pollConfig, CONFIG_POLL_MS);
 }
 
@@ -367,14 +393,11 @@ async function runInPageContext(tabId, fnString, args) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "GET_CONFIG") {
-    if (_cachedConfig) {
-      sendResponse({ ok: true, config: _cachedConfig, appOnline: _appOnline });
-    } else {
-      fetchConfig().then(cfg => {
-        sendResponse({ ok: !!cfg, config: cfg, appOnline: _appOnline });
-      });
-      return true;
-    }
+    // Luôn fetch fresh để đảm bảo custom_fields và mọi thay đổi mới nhất
+    fetchConfig().then(cfg => {
+      sendResponse({ ok: !!cfg, config: cfg || _cachedConfig, appOnline: _appOnline });
+    });
+    return true;
   }
 
   if (msg.type === "LOG") {
@@ -482,6 +505,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // ── CDP Captcha handlers ──────────────────────────────────────────────────
+
+  if (msg.type === "REINJECT_TAB") {
+    const tabId = msg.tabId;
+    if (!tabId) { sendResponse({ ok: false }); return true; }
+    chrome.tabs.get(tabId, tab => {
+      if (chrome.runtime.lastError || !tab?.url) {
+        sendResponse({ ok: false });
+        return;
+      }
+      // Xóa cache để injectTab không bị skip do dedup
+      _injected.delete(tabId);
+      injectTab(tabId, tab.url)
+        .then(() => sendResponse({ ok: true }))
+        .catch(() => sendResponse({ ok: false }));
+    });
+    return true;
+  }
 
   if (msg.type === "CDP_CHECK_STATUS") {
     const tabId = msg.tabId || sender.tab?.id;

@@ -64,7 +64,7 @@ function extractCtiketHuntInfo() {
   //    (API /tix/public/events/v2/{id} accept cả id lẫn slug)
   if (!out.slug) {
     try {
-      const m = location.pathname.match(/\/buy\/([a-zA-Z0-9]+)/);
+      const m = location.pathname.match(/\/buy\/([a-zA-Z0-9_-]+)/);
       if (m) {
         out.slug = m[1];
         svpLog(`⚠️ [Ctiket] Dùng eventId làm slug fallback: ${out.slug}`, "yellow");
@@ -196,7 +196,7 @@ async function directCtiketNav(eventId, occurrenceId) {
 
 // ── Main hunt Ctiket ──────────────────────────────────────────────────────────
 
-async function huntCtiket(cfg) {
+async function huntCtiket(cfg, autoSeat = true) {
   _huntCtkStop = false;
   _huntCtkPollerStop = false;
 
@@ -229,6 +229,9 @@ async function huntCtiket(cfg) {
   const finalOcid = ocidFromPage || ocidFromApi;
 
   svpLog(`✅ [Ctiket] eventId: ${eventId} | occurrenceId: ${finalOcid || "(không có)"}`, "green");
+
+  // Set hunt flag truoc khi navigate — chi khi autoSeat=true
+  if (autoSeat) sessionStorage.setItem("__svp_hunt_done__", String(Date.now()));
 
   await directCtiketNav(eventId, finalOcid);
 }

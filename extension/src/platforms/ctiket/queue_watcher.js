@@ -2,22 +2,22 @@
 // Chay khi tab dang o trang queue: cticket.vn/buy/{eid}/queue?ocid=...
 // Tu dong: whoami -> lay captcha token -> poll waiting-room/enter
 //   - people_ahead > 0 → poll lai moi POLL_INTERVAL_MS
-//   - people_ahead = 0 → luu booking_token + navigate ngay sang /buy (khong doi 8s)
+//   - people_ahead = 0 → luu booking_token + click button chuyen trang
+//   - button khong xuat hien sau 10s → KHONG break, goi lai enter() de React re-render
 //
 // window.watchCtiketQueue duoc export de runner.js goi khi SPA nav sang /queue.
 
 const _CK_BOOKING_TOKEN_KEY = "__svp_ck_booking_token__";
 const _CK_POLL_INTERVAL_MS  = 2000;
-const _CK_RECAPTCHA_KEY     = "6Leg798rAAAAAOQwZrZvhwtxUCvmXkNk3bGbexv0";
 
 let _ckWatching = false;
 
 function _ckIsQueuePage() {
-  return /\/buy\/[a-zA-Z0-9]+\/queue/.test(location.pathname);
+  return /\/buy\/[a-zA-Z0-9_-]+\/queue/.test(location.pathname);
 }
 
 function _ckExtractIds() {
-  const m = location.pathname.match(/\/buy\/([a-zA-Z0-9]+)\/queue/);
+  const m = location.pathname.match(/\/buy\/([a-zA-Z0-9_-]+)\/queue/);
   const eventId = m ? m[1] : null;
   let ocid = null;
   try { ocid = new URL(location.href).searchParams.get("ocid") || null; } catch {}
@@ -106,7 +106,6 @@ async function watchLoop() {
 
   while (_ckIsQueuePage()) {
     // Lay captcha moi moi vong (TTL recaptcha token ~2 phut)
-    // grecaptcha.ready() tu cho neu chua load, khong can retry thu cong
     let captchaToken;
     try {
       captchaToken = await _ckGetCaptchaToken();
@@ -134,7 +133,7 @@ async function watchLoop() {
     }
 
     // people_ahead = 0 → DA PASS QUEUE
-    svpLog("Ctiket queue_watcher: da pass queue! Luu token va chuyen trang...", "green");
+    svpLog("Ctiket queue_watcher: da pass queue! Luu token va cho button render...", "green");
 
     const expAt = _ckDecodeJwtExp(bookingToken) || (Date.now() + 10 * 60 * 1000);
 
@@ -148,8 +147,9 @@ async function watchLoop() {
       svpLog(`Ctiket queue_watcher: luu token loi (${e.message}) — van navigate`, "yellow");
     }
 
-    // Poll DOM cho den khi button "Chuyen den trang mua ve ngay" xuat hien roi click
-    // (button chi render sau khi React cap nhat state tu enter response)
+    // Poll DOM cho den khi button xuat hien roi click (toi da 10s)
+    // Neu khong thay button → KHONG break, tiep tuc vong while
+    // goi lai enter() de lay response moi, React moi re-render button
     svpLog("Ctiket queue_watcher: cho button render...", "blue");
     const clicked = await (async () => {
       const deadline = Date.now() + 10000;
@@ -157,6 +157,7 @@ async function watchLoop() {
         const btn = document.querySelector('button.btn.btn-primary');
         if (btn) {
           svpLog(`Ctiket queue_watcher: click button "${btn.textContent.trim()}"`, "green");
+          window.__svp_queue_passed__ = true;  // runner.js doc khi SPA nav sang /buy
           btn.click();
           return true;
         }
@@ -165,12 +166,11 @@ async function watchLoop() {
       return false;
     })();
 
-    if (!clicked) {
-      svpLog("Ctiket queue_watcher: button khong xuat hien sau 10s — thu goi enter lai", "yellow");
-      // Reset _ckWatching de vong poll tiep theo co the chay lai
-      _ckWatching = false;
-    }
-    break;
+    if (clicked) break;
+
+    // Button khong xuat hien — goi lai enter() o vong tiep theo
+    svpLog("Ctiket queue_watcher: button khong xuat hien sau 10s — goi lai enter()...", "yellow");
+    await new Promise(r => setTimeout(r, _CK_POLL_INTERVAL_MS));
   }
 
   _ckWatching = false;

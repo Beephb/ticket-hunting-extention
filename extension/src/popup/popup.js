@@ -19,42 +19,56 @@ function initMainTabs() {
 
 // ── CDP Toggle (Tab Captcha) ──────────────────────────────────────────────────
 async function initCdpTab() {
-  const toggle = document.getElementById("cdp-toggle");
-  const badge  = document.getElementById("cdp-status-badge");
-  if (!toggle || !badge) return;
+  const btn      = document.getElementById("btn-cdp");
+  const dot      = document.getElementById("cdp-dot");
+  const statusTx = document.getElementById("cdp-status-text");
+  const card     = document.getElementById("cdp-card");
+  const btnIcon  = document.getElementById("btn-cdp-icon");
+  const btnTitle = document.getElementById("btn-cdp-title");
+  const btnSub   = document.getElementById("btn-cdp-sub");
+  if (!btn) return;
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) return;
 
-  // Query trạng thái CDP hiện tại của tab
+  let connected = false;
+
+  function _render(isConnected) {
+    connected = isConnected;
+    if (isConnected) {
+      dot.className      = "cdp-dot connected";
+      statusTx.className = "cdp-status-text connected";
+      statusTx.textContent = "⚡ Đang kết nối";
+      card.className     = "captcha-card connected";
+      btn.className      = "btn-cdp connected";
+      btnIcon.textContent  = "✕";
+      btnTitle.textContent = "Ngắt kết nối";
+      btnSub.textContent   = "Bấm để tắt chuột phần cứng";
+    } else {
+      dot.className      = "cdp-dot";
+      statusTx.className = "cdp-status-text";
+      statusTx.textContent = "Chưa kết nối";
+      card.className     = "captcha-card";
+      btn.className      = "btn-cdp";
+      btnIcon.textContent  = "⚡";
+      btnTitle.textContent = "Kết nối CDP";
+      btnSub.textContent   = "Bấm để bật chuột phần cứng";
+    }
+  }
+
+  // Lấy trạng thái hiện tại
   chrome.runtime.sendMessage({ type: "CDP_CHECK_STATUS", tabId: tab.id }, res => {
-    const connected = !!res?.isConnected;
-    toggle.checked = connected;
-    _updateCdpBadge(badge, connected);
+    _render(!!res?.isConnected);
   });
 
-  // Clone để tránh duplicate event listener khi user bật/tắt tab nhiều lần
-  const fresh = toggle.cloneNode(true);
-  toggle.replaceWith(fresh);
-  fresh.addEventListener("change", async () => {
-    const action = fresh.checked ? "CDP_ATTACH" : "CDP_DETACH";
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const action = connected ? "CDP_DETACH" : "CDP_ATTACH";
     chrome.runtime.sendMessage({ type: action, tabId: tab.id }, res => {
-      const connected = res?.status === "connected";
-      fresh.checked = connected;
-      _updateCdpBadge(document.getElementById("cdp-status-badge"), connected);
+      btn.disabled = false;
+      _render(res?.status === "connected");
     });
   });
-}
-
-function _updateCdpBadge(badge, connected) {
-  if (!badge) return;
-  if (connected) {
-    badge.textContent = "⚡ Đang kết nối";
-    badge.className = "cdp-status-badge connected";
-  } else {
-    badge.textContent = "⚫ Chưa kết nối";
-    badge.className = "cdp-status-badge disconnected";
-  }
 }
 
 initMainTabs();
@@ -82,7 +96,11 @@ function renderPlatformTabs(activePlatform) {
       el.classList.remove("inactive-dim");
     } else {
       el.classList.remove("active");
-      el.classList.add(activePlatform ? "inactive-dim" : "");
+      if (activePlatform) {
+        el.classList.add("inactive-dim");
+      } else {
+        el.classList.remove("inactive-dim");
+      }
     }
   }
 }
@@ -170,18 +188,6 @@ async function fetchConfig() {
   } catch { return null; }
 }
 
-async function saveEnabled(val) {
-  try {
-    const headers = { "Content-Type": "application/json", ...(await _authHeaders()) };
-    await fetch(`${API_BASE}/config`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ auto_seat: { enabled: val } }),
-      signal: AbortSignal.timeout(2000),
-    });
-  } catch {}
-}
-
 function renderConfig(cfg, activePlatform) {
   const pk = PLATFORM_KEY_MAP[activePlatform];
   const as_ = pk ? (cfg?.auto_seat?.[pk] || {}) : {};
@@ -191,7 +197,6 @@ function renderConfig(cfg, activePlatform) {
   const zones = (as_.zone_priority || as_.priority_targets || []).slice(0, 3).join(", ") || "—";
   document.getElementById("cfg-zones").textContent = zones;
   document.getElementById("cfg-qty").textContent = as_.quantity || 1;
-  document.getElementById("bot-toggle").checked = !!as_.enabled;
 }
 
 function addLog(msg) {
@@ -200,6 +205,82 @@ function addLog(msg) {
   const box = document.getElementById("log-box");
   box.textContent = LOGS.slice(-4).join("\n");
   box.scrollTop = box.scrollHeight;
+}
+
+// ── Content script connection status ─────────────────────────────────────────
+
+async function checkContentScript() {
+  const dot     = document.getElementById("conn-dot");
+  const text    = document.getElementById("conn-text");
+  const btn     = document.getElementById("btn-reconnect");
+  if (!dot || !text || !btn) return;
+
+  // Checking state
+  dot.className  = "dot checking";
+  text.textContent = "⏳ Đang kiểm tra trang...";
+  btn.style.display = "none";
+
+  let tab;
+  try {
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch {}
+
+  if (!tab?.id) {
+    dot.className    = "dot offline";
+    text.textContent = "⚫ Không xác định được tab hiện tại";
+    return;
+  }
+
+  const url = tab.url || "";
+  const isSupportedPage =
+    url.includes("ticket.1zone.vn") ||
+    url.includes("ticketbox.vn")    ||
+    url.includes("cticket.vn");
+
+  if (!isSupportedPage) {
+    dot.className    = "dot";  // grey
+    text.textContent = "⚫ Không phải trang 1Zone / Ticketbox / Ctiket";
+    return;
+  }
+
+  // Ping content script
+  let alive = false;
+  try {
+    alive = await new Promise(resolve => {
+      chrome.tabs.sendMessage(tab.id, { type: "PING" }, res => {
+        if (chrome.runtime.lastError) resolve(false);
+        else resolve(!!res?.ok);
+      });
+    });
+  } catch {}
+
+  const hostname = new URL(url).hostname;
+
+  if (alive) {
+    dot.className    = "dot online";
+    text.textContent = `🟢 Đã kết nối — ${hostname}`;
+    btn.style.display = "none";
+  } else {
+    dot.className    = "dot offline";
+    text.textContent = `🔴 Chưa kết nối — ${hostname}`;
+    btn.style.display = "";
+
+    btn.disabled = false;
+    btn.onclick  = async () => {
+      btn.disabled     = true;
+      btn.textContent  = "⏳ Đang kết nối...";
+      dot.className    = "dot checking";
+      text.textContent = "⏳ Đang inject content script...";
+
+      // Yêu cầu background re-inject
+      chrome.runtime.sendMessage({ type: "REINJECT_TAB", tabId: tab.id }, async () => {
+        // Chờ 1.5s để script load xong rồi ping lại
+        await new Promise(r => setTimeout(r, 1500));
+        btn.textContent = "🔄 Kết nối lại";
+        await checkContentScript();
+      });
+    };
+  }
 }
 
 async function init() {
@@ -224,15 +305,8 @@ async function init() {
     addLog("⚠️ Không kết nối được App — hãy mở main.py");
   }
 
-  // Toggle bot
-  document.getElementById("bot-toggle").addEventListener("change", async e => {
-    await saveEnabled(e.target.checked);
-    addLog(e.target.checked ? "🟢 Bot bật" : "⏸ Bot tắt");
-    const tabs = await chrome.tabs.query({ url: ["https://ticket.1zone.vn/*", "https://ticketbox.vn/*"] });
-    for (const tab of tabs) {
-      chrome.tabs.sendMessage(tab.id, { type: "CONFIG_RELOAD" }).catch(() => {});
-    }
-  });
+  // Kiểm tra content script
+  await checkContentScript();
 
   // Helper gửi message tới tab hiện tại
   async function sendToTab(type, label) {
@@ -251,9 +325,6 @@ async function init() {
     if (el) el.addEventListener("click", handler);
   }
 
-  // Seat availability panel
-  initSeatPanel();
-
   bind("btn-hunt-auto", () => sendToTab("HUNT_NOW", "Bắt đầu Hunt + auto chọn ghế"));
   bind("btn-hunt-only", () => sendToTab("HUNT_ONLY", "Bắt đầu Hunt (chỉ navigate)"));
   bind("btn-seat",      () => sendToTab("RUN_NOW", "Gửi lệnh chọn ghế"));
@@ -263,280 +334,6 @@ async function init() {
 }
 
 init();
-
-// ── Seat availability panel ──────────────────────────────────────────────────
-let _seatPollInterval = null;
-
-async function _get1ZoneSeatData() {
-  // Ưu tiên đọc từ chrome.storage.session — được lưu khi hunt chạy, tồn tại qua mọi domain
-  const stored = await chrome.storage.session.get("svp_event_info");
-  let cachedEventId = stored?.svp_event_info?.eventId || null;
-  let cachedCalendarId = stored?.svp_event_info?.calendarId || null;
-
-  const tabs = await chrome.tabs.query({ url: ["https://ticket.1zone.vn/*", "https://queue.1zone.vn/*"] });
-  if (!tabs.length && !cachedEventId) return null;
-
-  let eventId = cachedEventId, calendarId = cachedCalendarId;
-
-  // Nếu chưa có từ storage, thử lấy từ tab ticket.1zone.vn
-  if (!eventId) {
-    for (const tab of tabs) {
-      if (!tab.url.includes('ticket.1zone.vn')) continue;
-      try {
-        const url = new URL(tab.url);
-        calendarId = url.searchParams.get('calendarId') || calendarId;
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: () => {
-            const el = document.querySelector('[id^="seatmap-container-"]');
-            const m = el?.id?.match(/seatmap-container-(\w+)/);
-            return m?.[1] || null;
-          },
-        });
-        eventId = results?.[0]?.result || null;
-        if (eventId) break;
-      } catch {}
-    }
-  }
-
-  if (!eventId || !calendarId) return null;
-
-  try {
-    const res = await fetch(
-      `https://prod.1zone.vn/ticketing/api/v4/ticket-summary/get-summary-event/${eventId}/zones?calendarId=${calendarId}`,
-      { credentials: "include", headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(5000) }
-    );
-    if (!res.ok) return null;
-    const json = await res.json();
-    if (!json.data?.length) return null;
-
-    return json.data.map(z => ({
-      name: z.name,
-      available: z.countTicketsAvailable ?? 0,
-    }));
-  } catch {}
-
-  return null;
-}
-
-function renderSeatList(zones) {
-  const list = document.getElementById("seat-drop-list");
-  const btn = document.getElementById("btn-seat-toggle");
-  if (!list || !btn) return;
-
-  if (!zones || !zones.length) {
-    list.innerHTML = '<div class="seat-drop-empty">Mở trang seatmap để xem</div>';
-    btn.textContent = "🪑 —";
-    btn.className = "btn-seat-toggle";
-    return;
-  }
-
-  const hasSoldout = zones.some(z => z.available === 0);
-  const allSoldout = zones.every(z => z.available === 0);
-
-  // Cập nhật nút: chỉ hiện icon + trạng thái tổng
-  if (allSoldout) {
-    btn.textContent = "🪑 Hết";
-    btn.className = "btn-seat-toggle has-soldout";
-  } else if (hasSoldout) {
-    btn.textContent = "🪑 Còn/Hết";
-    btn.className = "btn-seat-toggle has-soldout";
-  } else {
-    btn.textContent = "🪑 Còn";
-    btn.className = "btn-seat-toggle all-available";
-  }
-
-  // Render dropdown list — chỉ hiện còn/hết, không hiện số
-  list.innerHTML = zones.map(z => {
-    const soldout = z.available === 0;
-    return `<div class="seat-drop-row">
-      <span class="seat-drop-name">${z.name}</span>
-      <span class="seat-drop-status ${soldout ? 'soldout' : 'available'}">${soldout ? 'Hết' : 'Còn'}</span>
-    </div>`;
-  }).join("");
-}
-
-function initSeatPanel() {
-  pollSeatAvailability();
-  _seatPollInterval = setInterval(pollSeatAvailability, 3000);
-
-  // Toggle dropdown xổ sang trái
-  const seatBtn = document.getElementById("btn-seat-toggle");
-  const dropdown = document.getElementById("seat-dropdown");
-  if (seatBtn && dropdown) {
-    seatBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      dropdown.classList.toggle("open");
-    });
-    // Click ngoài để đóng
-    document.addEventListener("click", () => dropdown.classList.remove("open"));
-  }
-
-  // Nút overlay
-  const overlayBtn = document.getElementById("btn-overlay-toggle");
-  if (overlayBtn) overlayBtn.addEventListener("click", toggleOverlay);
-
-  // Khôi phục state overlay
-  chrome.storage.local.get("svp_overlay_on", r => {
-    _overlayOn = !!r.svp_overlay_on;
-    _updateOverlayBtn(overlayBtn);
-  });
-
-  // Queue status
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type === "SVP_QUEUE_UPDATE") {
-      const queueEl = document.getElementById("queue-status");
-      if (!queueEl) return;
-      if (msg.status === "QUEUE") {
-        queueEl.textContent = `⏳ Hàng đợi: vị trí #${msg.position}`;
-        queueEl.style.color = "#facc15";
-      } else if (msg.status === "BOOKING") {
-        queueEl.textContent = `🚀 Đến lượt! Còn ${msg.expireIn}s`;
-        queueEl.style.color = "#22c55e";
-      } else {
-        queueEl.textContent = "";
-      }
-    }
-  });
-}
-
-async function pollSeatAvailability() {
-  const zones = await _get1ZoneSeatData();
-  renderSeatList(zones);
-}
-
-function _overlayInjectFn() {
-  if (window.__svpOverlayRunning) return;
-  window.__svpOverlayRunning = true;
-
-  const overlayRoot = document.createElement('div');
-  overlayRoot.id = '__svp_overlay__';
-  overlayRoot.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9999';
-  document.body.appendChild(overlayRoot);
-
-  async function fetchZones(eventId, calendarId) {
-    // Dùng /zones API — trả về số thật hơn /get-summary-event
-    const res = await fetch(
-      'https://prod.1zone.vn/ticketing/api/v4/ticket-summary/get-summary-event/' + eventId + '/zones?calendarId=' + calendarId,
-      { credentials: 'include', headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(5000) }
-    );
-    const json = await res.json();
-    // Map ticketClassId → tổng số vé còn
-    const map = {};
-    for (const z of (json.data || [])) {
-      const tcId = z.ticketClassId;
-      if (!tcId) continue;
-      if (!(tcId in map)) map[tcId] = 0;
-      map[tcId] += z.countTicketsAvailable ?? 0;
-    }
-    return map;
-  }
-
-  function render(zoneMap) {
-    const stage = window.Konva?.stages?.[0];
-    if (!stage) return;
-    const canvas = document.querySelector('.konvajs-content canvas');
-    if (!canvas) return;
-    const cr = canvas.getBoundingClientRect();
-    overlayRoot.innerHTML = '';
-    stage.find('Path').forEach(p => {
-      const tcId = p.attrs?.ticketClassId;
-      if (tcId == null || !(tcId in zoneMap)) return;
-      const r = p.getClientRect({ skipShadow: true });
-      if (!r || r.width < 5) return;
-      const cx = cr.left + r.x + r.width / 2;
-      const cy = cr.top + r.y + r.height / 2;
-      const available = zoneMap[tcId];
-      const soldout = available === 0;
-      const el = document.createElement('div');
-      el.style.cssText = 'position:fixed;pointer-events:none;transform:translate(-50%,-50%);' +
-        'background:rgba(0,0,0,0.82);border-radius:5px;padding:3px 8px;white-space:nowrap;' +
-        'font-size:12px;font-weight:800;font-family:sans-serif;' +
-        'color:' + (soldout ? '#ef4444' : '#22c55e') + ';' +
-        'left:' + cx + 'px;top:' + cy + 'px;';
-      el.textContent = soldout ? 'Hết' : 'Còn';
-      overlayRoot.appendChild(el);
-    });
-  }
-
-  async function loop() {
-    const el = document.querySelector('[id^="seatmap-container-"]');
-    const m = el?.id?.match(/seatmap-container-(\w+)/);
-    const calM = location.href.match(/calendarId=([^&]+)/);
-    const eventId = m?.[1], calendarId = calM?.[1];
-    if (!eventId || !calendarId) { if (window.__svpOverlayRunning) setTimeout(loop, 2000); return; }
-
-    try {
-      const zoneMap = await fetchZones(eventId, calendarId);
-      render(zoneMap);
-    } catch(e) {}
-
-    if (window.__svpOverlayRunning) setTimeout(loop, 3000);
-  }
-
-  window.__svpOverlayStop = () => {
-    window.__svpOverlayRunning = false;
-    document.getElementById('__svp_overlay__')?.remove();
-  };
-
-  loop();
-}
-
-function _overlayStopFn() {
-  if (typeof window.__svpOverlayStop === 'function') window.__svpOverlayStop();
-  else { window.__svpOverlayRunning = false; document.getElementById('__svp_overlay__')?.remove(); }
-}
-
-let _overlayOn = false;
-
-async function _getActiveOrFirstTab(urlPatterns) {
-  const allTabs = await chrome.tabs.query({ url: urlPatterns });
-  if (!allTabs.length) return null;
-  const active = allTabs.find(t => t.active);
-  return active || allTabs[0];
-}
-
-async function toggleOverlay() {
-  const btn = document.getElementById("btn-overlay-toggle");
-  const tab = await _getActiveOrFirstTab(["https://ticket.1zone.vn/*"]);
-
-  if (!tab) {
-    addLog("❌ Không tìm thấy tab 1Zone");
-    return;
-  }
-
-  _overlayOn = !_overlayOn;
-  await chrome.storage.local.set({ svp_overlay_on: _overlayOn });
-
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: _overlayOn ? _overlayInjectFn : _overlayStopFn,
-      world: "MAIN",
-    });
-    addLog(_overlayOn ? "👁 Overlay bật" : "👁 Overlay tắt");
-  } catch(e) {
-    addLog(`❌ Inject lỗi: ${e.message}`);
-    _overlayOn = !_overlayOn; // rollback
-  }
-
-  _updateOverlayBtn(btn);
-}
-
-function _updateOverlayBtn(btn) {
-  if (!btn) return;
-  if (_overlayOn) {
-    btn.style.background = "#14532d";
-    btn.style.color = "#22c55e";
-    btn.style.borderColor = "#166534";
-    btn.title = "Tắt overlay trên seatmap";
-  } else {
-    btn.style.background = "#1e293b";
-    btn.style.color = "#64748b";
-    btn.style.borderColor = "#334155";
-    btn.title = "Bật overlay trên seatmap";
-  }
-}
 
 // Clock: sync 1 lần khi mở popup + tick mỗi 100ms
 syncTimeOffset();

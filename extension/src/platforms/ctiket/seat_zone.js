@@ -1,15 +1,13 @@
 // src/platforms/ctiket/seat_zone.js
-// Ctiket — GA seatmap theo zone (ticket_category), không có seatmap ghế cụ thể.
-// Flow đơn giản hơn 1Zone/Ticketbox: không cần click Konva/DOM, chỉ gọi API thuần:
-//   1. GET /tix/public/events/v2/{eventId}  -> list ticket_categories (zone) + for_sale
-//   2. GET /sessions/whoami?tokenize_as=jwt -> JWT auth (cookie Google OAuth session)
-//   3. GET /tix/private/booking/events/{eventId}/waiting-room/enter -> booking_token
-//   4. GET /tix/private/booking/events/{eventId}/quiz -> check quiz_required
-//   5. POST /tix/private/booking/events/{eventId}/booking -> dat ve, tra order public_id
+// Ctiket — DOM click flow (không pure API vì server track session state theo step)
+// Flow:
+//   Step 1: /buy/{eid} — click + zone match → click "Tiếp tục"
+//   Step 2: dialog thông tin (?step=2) — điền SĐT → click "Cập nhật thông tin"
+//   Step 3: review + thanh toán — click "Tiếp tục" → server POST /booking tự động
 
 const CTIKET_API_BASE = "https://cticket.vn";
 
-// -- Helpers chuan hoa ten zone (giong pattern Ticketbox/1Zone) --
+// ── Zone matching helpers ─────────────────────────────────────────────────────
 
 function normCk(s) {
   s = String(s || "").trim().toLowerCase();
@@ -28,7 +26,6 @@ function zoneScoreCk(target, candidate) {
   if (!tks.length || !cks.length) return 0;
   const t = tks.join(" "), c = cks.join(" ");
   if (t === c) return 1000;
-
   let pos = 0;
   for (const tk of tks) {
     let found = false;
@@ -44,302 +41,296 @@ function zoneScoreCk(target, candidate) {
   return score;
 }
 
-// -- Tu detect eventId/occurrenceId tu URL tab dang mo --
-// URL pattern: https://cticket.vn/buy/{eventId}?ocid={occurrenceId}&entryCode=&step=2
-// (giong cach Ticketbox tu lay showingId tu /events/{id}/bookings/{id})
+// ── URL helpers ───────────────────────────────────────────────────────────────
 
 function extractCtiketInfo() {
   const out = { url: location.href, eventId: null, occurrenceId: null };
-
   try {
-    const m = location.pathname.match(/\/buy\/([a-zA-Z0-9]+)/);
+    const m = location.pathname.match(/\/buy\/([a-zA-Z0-9_-]+)/);
     if (m) out.eventId = m[1];
   } catch {}
-
   try {
     out.occurrenceId = new URL(location.href).searchParams.get("ocid") || null;
   } catch {}
-
   return out;
 }
 
-async function getCtiketEventInfo(eventId) {
-  const res = await fetch(`${CTIKET_API_BASE}/tix/public/events/v2/${encodeURIComponent(eventId)}`, {
-    method: "GET",
-    credentials: "include",
-    headers: { "Accept": "application/json" },
-    signal: AbortSignal.timeout(6000),
-  });
-  if (!res.ok) throw new Error(`event info API ${res.status}`);
-  return res.json();
-}
+// ── DOM helpers ───────────────────────────────────────────────────────────────
 
-function extractZonesCk(eventInfo) {
-  const cats = eventInfo?.ticket_categories || [];
-  return cats.map(c => ({
-    id: c.id,
-    name: c.name || c.zone || "Khu vuc",
-    price: c.price,
-    maxBuy: c.max_buy,
-    forSale: !!c.for_sale,
-    ticketType: c.ticket_type || "ga",
-  }));
-}
-
-function matchZoneCk(zones, wantedName) {
-  let best = null, bestScore = 0;
-  for (const z of zones) {
-    if (!z.forSale) continue;
-    const score = zoneScoreCk(wantedName, z.name);
-    if (score > bestScore) { bestScore = score; best = z; }
+// Poll DOM cho đến khi selector tìm thấy element (tối đa timeoutMs)
+async function waitForElement(selector, timeoutMs = 8000, intervalMs = 100) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const el = document.querySelector(selector);
+    if (el) return el;
+    await new Promise(r => setTimeout(r, intervalMs));
   }
-  return bestScore > 0 ? best : null;
+  return null;
 }
 
-async function ctiketWhoami() {
-  const res = await fetch(`${CTIKET_API_BASE}/sessions/whoami?tokenize_as=jwt`, {
-    method: "GET",
-    credentials: "include",
-    headers: { "Accept": "application/json, text/plain, */*" },
-    signal: AbortSignal.timeout(6000),
-  });
-  if (!res.ok) return null;
-  const data = await res.json();
-  return data?.tokenized || null;
-}
-
-const CTIKET_RECAPTCHA_SITE_KEY = "6Leg798rAAAAAOQwZrZvhwtxUCvmXkNk3bGbexv0";
-
-// grecaptcha duoc trang Ctiket tu load san - chi can goi lai execute() de lay token,
-// khong can tu dung widget captcha rieng (khac han slide/rotate cua Ticketbox).
-function getCtiketCaptchaToken() {
-  return new Promise((resolve, reject) => {
-    if (typeof grecaptcha === "undefined") {
-      reject(new Error("grecaptcha chua load tren trang nay"));
-      return;
-    }
-    grecaptcha.ready(() => {
-      grecaptcha.execute(CTIKET_RECAPTCHA_SITE_KEY, { action: "submit" })
-        .then(resolve)
-        .catch(reject);
-    });
-  });
-}
-
-async function ctiketEnterWaitingRoom(eventId, jwt, captchaToken) {
-  const res = await fetch(`${CTIKET_API_BASE}/tix/private/booking/events/${eventId}/waiting-room/enter`, {
-    method: "GET",
-    credentials: "include",
-    headers: {
-      "Accept": "application/json",
-      "Authorization": `Bearer ${jwt}`,
-      "x-captcha-token": captchaToken,
-    },
-    signal: AbortSignal.timeout(8000),
-  });
-  const text = await res.text();
-  let data = null;
-  try { data = JSON.parse(text); } catch {}
-  return { ok: res.ok, status: res.status, data };
-}
-
-async function ctiketCheckQuiz(eventId, jwt, bookingToken) {
-  const res = await fetch(`${CTIKET_API_BASE}/tix/private/booking/events/${eventId}/quiz`, {
-    method: "GET",
-    credentials: "include",
-    headers: {
-      "Accept": "application/json",
-      "Authorization": `Bearer ${jwt}`,
-      "booking-token": bookingToken,
-    },
-    signal: AbortSignal.timeout(6000),
-  });
-  if (!res.ok) return { quiz_required: false };
-  return res.json();
-}
-
-// Giu booking_token song trong luc dang chon zone/dien thong tin (~5s/lan).
-// Server tu thu hoi token sau ~7 phut neu khong co keep-alive (xem flow capture).
-async function ctiketKeepAlive(eventId, jwt, bookingToken) {
-  const res = await fetch(`${CTIKET_API_BASE}/tix/private/booking/events/${eventId}/keep-alive`, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      "Accept": "application/json",
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${jwt}`,
-      "booking-token": bookingToken,
-      "Origin": "https://cticket.vn",
-    },
-    body: "{}",
-    signal: AbortSignal.timeout(6000),
-  });
-  return res.ok;
-}
-
-let _ckKeepAliveTimer = null;
-
-function startCtiketKeepAlive(eventId, jwt, bookingToken, intervalMs = 5000) {
-  stopCtiketKeepAlive();
-  _ckKeepAliveTimer = setInterval(async () => {
-    try {
-      const ok = await ctiketKeepAlive(eventId, jwt, bookingToken);
-      if (!ok) svpLog("Ctiket: keep-alive that bai (token co the het han)", "yellow");
-    } catch (e) {
-      svpLog(`Ctiket: keep-alive loi - ${e.message}`, "yellow");
-    }
-  }, intervalMs);
-}
-
-function stopCtiketKeepAlive() {
-  if (_ckKeepAliveTimer) {
-    clearInterval(_ckKeepAliveTimer);
-    _ckKeepAliveTimer = null;
+// Điền value vào input theo cách React nhận được (simulate native setter + input event)
+function fillReactInput(input, value) {
+  input.focus();
+  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+  nativeSetter.call(input, "");
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  // Simulate typing từng ký tự để React state update đúng
+  for (const char of String(value)) {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: char, bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keypress", { key: char, bubbles: true }));
+    nativeSetter.call(input, input.value + char);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: char, bubbles: true }));
   }
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  input.blur();
 }
 
-async function ctiketSubmitBooking(eventId, jwt, bookingToken, { items, claimerInfo, occurrenceId, paymentMethod }) {
-  const payload = {
-    payment_method: paymentMethod || "BANK_TRANSFER",
-    billing_info: { export_bill: false },
-    items,
-    claimer_info: claimerInfo,
-    delivery_info: { delivery_method: "email" },
-    occurrence_id: occurrenceId,
-    attendees_info: [],
-  };
-
-  const res = await fetch(`${CTIKET_API_BASE}/tix/private/booking/events/${eventId}/booking`, {
-    method: "POST",
-    credentials: "include",
-    headers: {
-      "Accept": "application/json",
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${jwt}`,
-      "booking-token": bookingToken,
-      "Origin": "https://cticket.vn",
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(10000),
-  });
-  const text = await res.text();
-  let data = null;
-  try { data = JSON.parse(text); } catch {}
-  return { ok: res.ok, status: res.status, data, raw: text };
+function normalizePhoneVN(phone) {
+  if (!phone) return phone;
+  const p = String(phone).trim().replace(/\s+/g, "");
+  if (p.startsWith("0")) return p; // giữ nguyên 0xxx vì form nhận dạng này
+  if (p.startsWith("+84")) return "0" + p.slice(3);
+  if (p.startsWith("84")) return "0" + p.slice(2);
+  return p;
 }
+
+// ── Step 1: Chọn zone + click Tiếp tục ───────────────────────────────────────
+
+// Re-query plusBtn theo tên zone (tránh stale reference sau React re-render)
+function ckFindPlusBtn(zoneName) {
+  for (const wrapper of document.querySelectorAll(".ticket-wrapper")) {
+    const nameEl = wrapper.querySelector("p");
+    if (!nameEl) continue;
+    if (nameEl.textContent.trim() === zoneName) {
+      return wrapper.querySelector("button:last-child") || null;
+    }
+  }
+  return null;
+}
+
+// Click + cho 1 zone, trả về số lượng thực tế click được
+async function ckClickPlus(zoneName, quantity) {
+  let actual = 0;
+  for (let i = 0; i < quantity; i++) {
+    const btn = ckFindPlusBtn(zoneName);
+    if (!btn || btn.disabled) {
+      svpLog(`Ctiket step1: zone "${zoneName}" het ve sau ${actual} ve`, "yellow");
+      break;
+    }
+    btn.click();
+    actual++;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  return actual;
+}
+
+async function ckStep1SelectZone(zoneItems, allowPartial) {
+  // zoneItems: [{zone: string, quantity: number}] — mỗi zone có số lượng riêng
+  svpLog("Ctiket step1: tim zone tren trang...", "blue");
+
+  const firstWrapper = await waitForElement(".ticket-wrapper", 8000);
+  if (!firstWrapper) {
+    svpLog("Ctiket step1: khong tim thay ticket-wrapper", "red");
+    return false;
+  }
+
+  let totalClicked = 0;
+  let totalWanted = zoneItems.reduce((s, i) => s + (i.quantity || 1), 0);
+
+  // Duyệt từng zone item theo priority
+  for (const item of zoneItems) {
+    const wanted = item.zone;
+    const qty = item.quantity || 1;
+
+    // Tìm zone match tốt nhất còn vé
+    let bestMatch = null, bestScore = 0;
+    for (const wrapper of document.querySelectorAll(".ticket-wrapper")) {
+      const nameEl = wrapper.querySelector("p");
+      if (!nameEl) continue;
+      const name = nameEl.textContent.trim();
+      const plusBtn = wrapper.querySelector("button:last-child");
+      if (!plusBtn || plusBtn.disabled) continue;
+      const score = zoneScoreCk(wanted, name);
+      if (score > bestScore) { bestScore = score; bestMatch = name; }
+    }
+
+    if (!bestMatch) {
+      svpLog(`Ctiket step1: zone "${wanted}" khong con ve — bo qua`, "yellow");
+      continue;
+    }
+
+    svpLog(`Ctiket step1: match "${wanted}" -> "${bestMatch}" — click + x${qty}`, "green");
+    const clicked = await ckClickPlus(bestMatch, qty);
+    totalClicked += clicked;
+
+    if (clicked < qty && !allowPartial) {
+      svpLog(`Ctiket step1: zone "${bestMatch}" chi co ${clicked}/${qty} ve, allow_partial=false`, "yellow");
+    }
+  }
+
+  if (totalClicked === 0) {
+    svpLog("Ctiket step1: khong chon duoc ve nao", "red");
+    return false;
+  }
+
+  if (totalClicked < totalWanted && !allowPartial) {
+    svpLog(`Ctiket step1: chi chon duoc ${totalClicked}/${totalWanted} ve, allow_partial=false — dung`, "red");
+    return false;
+  }
+
+  svpLog(`Ctiket step1: da chon ${totalClicked}/${totalWanted} ve — click Tiep tuc`, "green");
+  await new Promise(r => setTimeout(r, 500));
+
+  const continueBtn = document.querySelector('[data-id="buy-button-continue-desktop"]')
+    || document.querySelector('[id="buy-button-continue-desktop"]')
+    || [...document.querySelectorAll("button")].find(b => b.textContent.trim() === "Tiếp tục" && !b.disabled);
+
+  if (!continueBtn) {
+    svpLog("Ctiket step1: khong tim thay nut Tiep tuc", "red");
+    return false;
+  }
+
+  continueBtn.click();
+  return true;
+}
+
+// ── Step 2: Điền thông tin + click Cập nhật ──────────────────────────────────
+
+async function ckStep2FillInfo(phone, cfg) {
+  svpLog("Ctiket step2: doi dialog thong tin xuat hien...", "blue");
+
+  // Đợi dialog xuất hiện
+  const phoneInput = await waitForElement("#claimerInfo\\.phoneNumber", 8000);
+  if (!phoneInput) {
+    svpLog("Ctiket step2: dialog khong xuat hien sau 8s", "red");
+    return false;
+  }
+
+  const normalizedPhone = normalizePhoneVN(phone);
+  svpLog(`Ctiket step2: dien SDT ${normalizedPhone}`, "blue");
+  fillReactInput(phoneInput, normalizedPhone);
+
+  // Điền custom fields vào dialog nếu có
+  if (cfg?.custom_fields?.length) {
+    const allInputs = document.querySelectorAll(
+      "input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='checkbox']):not([type='radio']), textarea"
+    );
+    for (const field of cfg.custom_fields) {
+      const kw = (field.keyword || "").toLowerCase().trim();
+      const val = field.value || "";
+      if (!kw || !val) continue;
+      for (const el of allInputs) {
+        let labelText = "";
+        if (el.id) {
+          const lbl = document.querySelector(`label[for="${el.id}"]`);
+          if (lbl) labelText = lbl.innerText?.trim() || "";
+        }
+        const haystack = [
+          labelText,
+          el.getAttribute("placeholder") || "",
+          el.getAttribute("name") || "",
+          el.getAttribute("id") || "",
+        ].join(" ").toLowerCase();
+        if (!haystack.includes(kw)) continue;
+        fillReactInput(el, val);
+        svpLog(`Ctiket step2: custom field [${kw}] → "${val}"`, "green");
+        break;
+      }
+    }
+  }
+
+  await new Promise(r => setTimeout(r, 500));
+
+  // Click "Cập nhật thông tin"
+  const saveBtn = document.querySelector("#claimer-info-dialog-button-save")
+    || [...document.querySelectorAll("button")].find(b => b.textContent.trim() === "Cập nhật thông tin" && !b.disabled);
+
+  if (!saveBtn) {
+    svpLog("Ctiket step2: khong tim thay nut Cap nhat thong tin", "red");
+    return false;
+  }
+
+  svpLog("Ctiket step2: click Cap nhat thong tin...", "blue");
+  saveBtn.click();
+  return true;
+}
+
+// ── Step 3: Click Tiếp tục để submit booking ─────────────────────────────────
+
+async function ckStep3Submit() {
+  svpLog("Ctiket step3: doi trang review...", "blue");
+
+  // Đợi dialog đóng và trang review xuất hiện
+  await new Promise(r => setTimeout(r, 1000));
+
+  // Đợi dialog biến mất
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const dialog = document.querySelector("#claimer-info-dialog-button-save");
+    if (!dialog) break;
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  await new Promise(r => setTimeout(r, 500));
+
+  // Click "Tiếp tục" ở trang review
+  const continueBtn = document.querySelector('[data-id="buy-button-continue-desktop"], [id="buy-button-continue-desktop"]')
+    || [...document.querySelectorAll("button")].find(b => b.textContent.trim() === "Tiếp tục" && !b.disabled);
+
+  if (!continueBtn) {
+    svpLog("Ctiket step3: khong tim thay nut Tiep tuc", "red");
+    return false;
+  }
+
+  svpLog("Ctiket step3: click Tiep tuc de submit booking...", "green");
+  continueBtn.click();
+  return true;
+}
+
+// ── Main entry ────────────────────────────────────────────────────────────────
 
 async function runCtiketSeatZone(cfg) {
-  const BOOKING_TOKEN_KEY = "__svp_ck_booking_token__";
-
   const info = extractCtiketInfo();
-  const eventId = info.eventId;
-  const occurrenceId = info.occurrenceId;
-  const claimerInfo = {
-    full_name: cfg?.name,
-    email: cfg?.email,
-    phone_number: cfg?.phone,
-  };
+  const { eventId, occurrenceId } = info;
 
   if (!eventId || !occurrenceId) {
     svpLog(`Ctiket: khong detect duoc eventId/occurrenceId tu URL (${info.url})`, "red");
     return false;
   }
-  if (!claimerInfo?.full_name || !claimerInfo?.email || !claimerInfo?.phone_number) {
-    svpLog("Ctiket: thieu claimer_info (ho ten/email/sdt) trong cfg", "red");
-    return false;
-  }
 
-  // Doc booking_token + jwt da duoc queue_watcher.js luu san qua background
-  let tokenData = null;
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: "SVP_GET_CK_TOKEN" });
-    tokenData = resp?.payload || null;
-  } catch (e) {
-    svpLog(`Ctiket: loi doc token tu background (${e.message})`, "red");
-    return false;
-  }
-
-  if (!tokenData || tokenData.eventId !== eventId) {
-    svpLog("Ctiket: chua co booking_token cho event nay - can qua trang queue truoc (queue_watcher.js se tu luu)", "red");
-    return false;
-  }
-  if (Date.now() >= tokenData.expAt) {
-    svpLog("Ctiket: booking_token da het han (~7 phut) - quay lai trang queue de lay token moi", "red");
-    return false;
-  }
-  const { jwt, bookingToken } = tokenData;
-
-  // Bat dau keep-alive ngay khi co token hop le - giu song trong luc
-  // goi API zone info, check quiz, submit booking ben duoi.
-  startCtiketKeepAlive(eventId, jwt, bookingToken);
-
-  try {
-    return await _runCtiketSeatZoneInner(cfg, { eventId, occurrenceId, jwt, bookingToken });
-  } finally {
-    stopCtiketKeepAlive();
-  }
-}
-
-async function _runCtiketSeatZoneInner(cfg, { eventId, occurrenceId, jwt, bookingToken }) {
   const aseat = cfg?.auto_seat?.["ctiket"] || cfg?.auto_seat || {};
-  const priorities = aseat.zone_priority || aseat.priority_targets || cfg?.zone_priority || [];
-  const quantity = aseat.quantity || cfg?.quantity || 1;
-  const claimerInfo = {
-    full_name: cfg?.name,
-    email: cfg?.email,
-    phone_number: cfg?.phone,
-  };
-  let eventInfo;
-  try {
-    eventInfo = await getCtiketEventInfo(eventId);
-  } catch (e) {
-    svpLog(`Ctiket: loi lay event info - ${e.message}`, "red");
-    return false;
-  }
-  const zones = extractZonesCk(eventInfo);
-  if (!zones.length) {
-    svpLog("Ctiket: event khong co ticket_categories nao", "yellow");
-    return false;
+  const allowPartial = !!aseat.allow_partial;
+  const phone = cfg?.phone;
+
+  // Đọc items mới [{zone, quantity}] hoặc fallback zone_priority + quantity cũ
+  let zoneItems = [];
+  if (aseat.items && aseat.items.length) {
+    zoneItems = aseat.items.filter(i => i.zone);
+  } else {
+    const zones = aseat.zone_priority || aseat.priority_targets || cfg?.zone_priority || [];
+    const qty = aseat.quantity || cfg?.quantity || 1;
+    zoneItems = zones.map(z => ({ zone: z, quantity: qty }));
   }
 
-  let matched = null;
-  for (const wanted of priorities) {
-    matched = matchZoneCk(zones, wanted);
-    if (matched) { svpLog(`Ctiket: match zone "${wanted}" -> "${matched.name}"`, "green"); break; }
+  if (!zoneItems.length) {
+    svpLog("Ctiket: chua cau hinh zone/items", "red");
+    return false;
   }
-  if (!matched) {
-    svpLog("Ctiket: chua co zone nao trong priority list con ban", "yellow");
+  if (!phone) {
+    svpLog("Ctiket: thieu so dien thoai trong cfg", "red");
     return false;
   }
 
-  const quiz = await ctiketCheckQuiz(eventId, jwt, bookingToken);
-  if (quiz?.quiz_required) {
-    svpLog("Ctiket: event nay yeu cau quiz truoc khi dat ve - chua ho tro tu dong", "yellow");
-    return false;
-  }
+  // Step 1: chọn zone
+  const step1Ok = await ckStep1SelectZone(zoneItems, allowPartial);
+  if (!step1Ok) return false;
 
-  const items = [{
-    ticket_category_id: matched.id,
-    quantity,
-    desire_count: quantity,
-    ticket_type: matched.ticketType,
-  }];
+  // Step 2: điền thông tin (dialog xuất hiện sau khi click Tiếp tục ở step 1)
+  // Sau khi click "Cập nhật thông tin" → dừng để user kiểm tra rồi tự bấm tiếp
+  const step2Ok = await ckStep2FillInfo(phone, cfg);
+  if (!step2Ok) return false;
 
-  const result = await ctiketSubmitBooking(eventId, jwt, bookingToken, {
-    items, claimerInfo, occurrenceId,
-    paymentMethod: cfg?.ctiket?.paymentMethod,
-  });
-
-  if (!result.ok || !result.data?.public_id) {
-    svpLog(`Ctiket: booking that bai (status=${result.status}) - ${result.raw?.slice(0, 200)}`, "red");
-    return false;
-  }
-
-  svpLog(`Ctiket: dat ve thanh cong! Order #${result.data.public_id} - ${result.data.amount}d`, "green");
-
-  try {
-    location.href = result.data.invoice_url || `https://cticket.vn/checkout/${result.data.public_id}`;
-  } catch {}
-
+  svpLog("Ctiket: da dien thong tin — vui long kiem tra va bam Tiep tuc de dat ve", "green");
   return true;
 }

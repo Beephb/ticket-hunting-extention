@@ -32,16 +32,19 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: #4b5563; }
   .dot.online { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.2); }
   .dot.offline { background: #ef4444; }
+  .dot.checking { background: #f59e0b; animation: pulse-dot .8s ease-in-out infinite; }
+  @keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
   .status-text { flex: 1; font-size: 12px; color: #94a3b8; }
 
-  .toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-  .toggle-label { font-weight: 500; color: #e2e8f0; }
-  .toggle { position: relative; width: 40px; height: 22px; }
-  .toggle input { opacity: 0; width: 0; height: 0; }
-  .slider { position: absolute; inset: 0; background: #374151; border-radius: 22px; cursor: pointer; transition: background .2s; }
-  .slider:before { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: transform .2s; }
-  input:checked + .slider { background: #22c55e; }
-  input:checked + .slider:before { transform: translateX(18px); }
+  /* ── Connection status (content script) ── */
+  .conn-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+    padding: 7px 12px; background: #111827; border-radius: 8px; border: 1px solid #1e293b; }
+  .conn-text { flex: 1; font-size: 12px; color: #94a3b8; }
+  .btn-reconnect { padding: 3px 10px; border: none; border-radius: 6px;
+    background: #1e3a5f; color: #93c5fd; font-size: 11px; font-weight: 600;
+    cursor: pointer; transition: background .15s; white-space: nowrap; }
+  .btn-reconnect:hover { background: #1e40af; }
+  .btn-reconnect:disabled { opacity: .45; cursor: default; }
 
   .btn-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
   .btn { position: relative; width: 100%; padding: 0; border: none; border-radius: 8px;
@@ -83,39 +86,6 @@
   }
   .clock-sync { font-size: 9px; color: #64748b; margin-left: 4px; }
 
-  /* Seat dropdown */
-  .seat-dropdown-wrap { position: relative; display: inline-block; }
-  .btn-seat-toggle {
-    background: #1e293b; color: #94a3b8; border: 1px solid #334155;
-    border-radius: 6px; font-size: 11px; font-weight: 600;
-    padding: 4px 8px; cursor: pointer; white-space: nowrap;
-    transition: background .15s;
-  }
-  .btn-seat-toggle:hover { background: #273548; color: #e2e8f0; }
-  .btn-seat-toggle.has-soldout { color: #ef4444; border-color: #7f1d1d; }
-  .btn-seat-toggle.all-available { color: #22c55e; border-color: #14532d; }
-
-  .seat-dropdown {
-    display: none; position: absolute; right: 0; top: calc(100% + 4px);
-    background: #111827; border: 1px solid #334155; border-radius: 8px;
-    padding: 6px 0; min-width: 180px; z-index: 99999;
-    box-shadow: 0 4px 16px rgba(0,0,0,.7);
-  }
-  .seat-dropdown.open { display: block; }
-  .seat-dropdown-title {
-    font-size: 10px; color: #475569; font-weight: 600;
-    padding: 2px 12px 6px; border-bottom: 1px solid #1e293b; margin-bottom: 4px;
-  }
-  .seat-drop-row {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 3px 12px; font-size: 11px; gap: 12px;
-  }
-  .seat-drop-row:hover { background: #1e293b; }
-  .seat-drop-name { color: #cbd5e1; }
-  .seat-drop-status { font-weight: 700; white-space: nowrap; }
-  .seat-drop-status.available { color: #22c55e; }
-  .seat-drop-status.soldout { color: #ef4444; }
-  .seat-drop-empty { font-size: 11px; color: #475569; padding: 4px 12px; }
   .platform-tabs { display: flex; gap: 4px; margin-bottom: 10px; }
   .platform-tab { flex: 1; text-align: center; padding: 6px 4px; border-radius: 6px;
     font-size: 11px; font-weight: 600; background: #111827; color: #475569;
@@ -124,33 +94,35 @@
   .platform-tab.inactive-dim { opacity: .5; }
 
   /* ── Tab Captcha ── */
-  .captcha-body { padding: 16px 14px; }
+  .captcha-body { padding: 14px; }
   .captcha-card {
     background: #111827; border: 1px solid #1e293b; border-radius: 10px;
-    padding: 14px; margin-bottom: 12px;
+    padding: 14px; margin-bottom: 12px; transition: border-color .2s;
   }
-  .captcha-card-title {
-    font-size: 12px; font-weight: 700; color: #fbbf24; margin-bottom: 10px;
+  .captcha-card.connected { border-color: #14532d; }
+  .captcha-card-title { font-size: 12px; font-weight: 600; color: #94a3b8; margin-bottom: 10px; }
+  .cdp-desc { font-size: 11px; color: #475569; line-height: 1.6; margin-bottom: 14px; }
+  .cdp-status-row { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .cdp-dot { width: 7px; height: 7px; border-radius: 50%; background: #475569; flex-shrink: 0; transition: background .2s; }
+  .cdp-dot.connected { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,.2); }
+  .cdp-status-text { font-size: 11px; color: #475569; transition: color .2s; }
+  .cdp-status-text.connected { color: #22c55e; }
+  .btn-cdp {
+    width: 100%; border: none; border-radius: 8px; padding: 10px 14px;
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    background: #1e3a5f; border: 1px solid #2d5a8e; transition: background .15s;
   }
-  .cdp-row {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 0;
-  }
-  .cdp-info { flex: 1; }
-  .cdp-label { font-size: 13px; font-weight: 600; color: #e2e8f0; }
-  .cdp-desc { font-size: 10px; color: #64748b; margin-top: 3px; line-height: 1.4; }
-  .cdp-status-badge {
-    font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 12px;
-    margin-top: 6px; display: inline-block;
-  }
-  .cdp-status-badge.connected { background: #14532d; color: #86efac; }
-  .cdp-status-badge.disconnected { background: #1e293b; color: #64748b; }
-
+  .btn-cdp.connected { background: #2d1515; border-color: #4a1b1b; }
+  .btn-cdp-icon { font-size: 15px; }
+  .btn-cdp-title { font-size: 12px; font-weight: 600; color: #93c5fd; display: block; text-align: left; }
+  .btn-cdp.connected .btn-cdp-title { color: #f87171; }
+  .btn-cdp-sub { font-size: 10px; color: #4a7ba7; display: block; text-align: left; }
+  .btn-cdp.connected .btn-cdp-sub { color: #7f3535; }
   .captcha-note {
-    background: #0d1117; border: 1px solid #1e293b; border-radius: 8px;
-    padding: 10px 12px; font-size: 10px; color: #64748b; line-height: 1.6;
+    background: #111827; border: 1px solid #1e293b; border-radius: 8px;
+    padding: 10px 12px; font-size: 10px; color: #475569; line-height: 1.7;
   }
-  .captcha-note strong { color: #94a3b8; }
+  .captcha-note span { color: #64748b; }
 </style>
 </head>
 <body>
@@ -188,27 +160,11 @@
       <div class="status-text" id="app-status">Đang kết nối Desktop App...</div>
     </div>
 
-    <div class="toggle-row">
-      <span class="toggle-label">Bot tự động</span>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <div class="seat-dropdown-wrap">
-          <button class="btn-seat-toggle" id="btn-seat-toggle" title="Xem tình trạng ghế">🪑 —</button>
-          <div class="seat-dropdown" id="seat-dropdown">
-            <div class="seat-dropdown-title">TÌNH TRẠNG GHẾ [v10]</div>
-            <div id="seat-drop-list"><div class="seat-drop-empty">Đang tải...</div></div>
-          </div>
-        </div>
-        <button id="btn-overlay-toggle" style="
-          background:#1e293b;color:#64748b;border:1px solid #334155;border-radius:6px;
-          font-size:11px;font-weight:600;padding:4px 8px;cursor:pointer;
-          transition:background .15s;white-space:nowrap;" title="Hiện/ẩn overlay trên seatmap">👁</button>
-        <label class="toggle">
-          <input type="checkbox" id="bot-toggle">
-          <span class="slider"></span>
-        </label>
-      </div>
+    <div class="conn-row" id="conn-row">
+      <div class="dot checking" id="conn-dot"></div>
+      <div class="conn-text" id="conn-text">⏳ Đang kiểm tra trang...</div>
+      <button class="btn-reconnect" id="btn-reconnect" style="display:none">🔄 Kết nối lại</button>
     </div>
-    <div id="queue-status" style="font-size:11px;font-weight:600;margin-bottom:8px;min-height:16px;"></div>
 
     <div class="config-box" id="config-box">
       <div class="row"><span>Platform</span><span class="val" id="cfg-platform">—</span></div>
@@ -268,29 +224,29 @@
 <div class="tab-panel" id="panel-captcha">
   <div class="captcha-body">
 
-    <div class="captcha-card">
-      <div class="captcha-card-title">🖱️ Giao thức CDP (Chrome DevTools)</div>
-      <div class="cdp-row">
-        <div class="cdp-info">
-          <div class="cdp-label">Kết nối chuột phần cứng</div>
-          <div class="cdp-desc">
-            Bật để extension điều khiển chuột thật qua CDP,<br>
-            giúp kéo slider captcha chính xác và tự nhiên hơn.
-          </div>
-          <div class="cdp-status-badge disconnected" id="cdp-status-badge">⚫ Chưa kết nối</div>
-        </div>
-        <label class="toggle" style="margin-left:12px;flex-shrink:0;">
-          <input type="checkbox" id="cdp-toggle">
-          <span class="slider"></span>
-        </label>
+    <div class="captcha-card" id="cdp-card">
+      <div class="captcha-card-title">🖱️ CDP — Chuột phần cứng</div>
+      <div class="cdp-desc">
+        Bật để extension điều khiển chuột thật qua CDP,
+        giúp kéo slider captcha chính xác và tự nhiên hơn.
       </div>
+      <div class="cdp-status-row">
+        <div class="cdp-dot" id="cdp-dot"></div>
+        <span class="cdp-status-text" id="cdp-status-text">Chưa kết nối</span>
+      </div>
+      <button class="btn-cdp" id="btn-cdp">
+        <span class="btn-cdp-icon" id="btn-cdp-icon">⚡</span>
+        <div>
+          <span class="btn-cdp-title" id="btn-cdp-title">Kết nối CDP</span>
+          <span class="btn-cdp-sub" id="btn-cdp-sub">Bấm để bật chuột phần cứng</span>
+        </div>
+      </button>
     </div>
 
     <div class="captcha-note">
-      <strong>Lưu ý:</strong><br>
-      • Captcha auto-solve chạy tự động khi phát hiện slider trên trang <strong>Ticketbox</strong>.<br>
+      • Captcha auto-solve chạy tự động khi phát hiện slider trên <span>Ticketbox</span>.<br>
       • Bật CDP trước khi vào trang để đạt tốc độ tốt nhất (~0ms delay).<br>
-      • Server xử lý ảnh chạy tại <strong>port 9279</strong> (cùng với Desktop App).
+      • Server xử lý ảnh chạy tại <span>port 9279</span> (cùng với Desktop App).
     </div>
 
   </div>
