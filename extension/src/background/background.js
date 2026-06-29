@@ -195,7 +195,22 @@ const QUEUE_ISOLATED_SCRIPTS = [
 const _injected = new Map();
 
 let _cachedConfig = null;
+let _cachedSlots = [];          // cache danh sách slots từ /slots
 let _appOnline = false;
+
+// Tab → slot index mapping (tabId → slotIndex, -1 = dùng config global)
+const _tabSlot = new Map();
+
+// Lấy config đã merge slot cho 1 tab cụ thể
+function _configForTab(tabId) {
+  if (!_cachedConfig) return null;
+  const slotIdx = _tabSlot.get(tabId);
+  if (slotIdx == null || slotIdx < 0 || slotIdx >= _cachedSlots.length) {
+    return _cachedConfig; // dùng global
+  }
+  const slot = _cachedSlots[slotIdx];
+  return { ..._cachedConfig, auto_seat: slot.auto_seat };
+}
 
 // ── Inject content scripts vào tab ───────────────────────────────────────────
 
@@ -288,6 +303,7 @@ chrome.webNavigation.onDOMContentLoaded.addListener(({ tabId, url, frameId }) =>
 // Xóa inject cache khi tab đóng
 chrome.tabs.onRemoved.addListener(tabId => {
   _injected.delete(tabId);
+  _tabSlot.delete(tabId);
 });
 
 // ── Config API ────────────────────────────────────────────────────────────────
@@ -301,6 +317,16 @@ async function fetchConfig() {
     const cfg = await res.json();
     _cachedConfig = cfg;
     _appOnline = true;
+
+    // Fetch slots song song
+    try {
+      const sRes = await apiFetch("/slots", { signal: AbortSignal.timeout(2000) });
+      if (sRes.ok) {
+        const sData = await sRes.json();
+        _cachedSlots = sData.slots || [];
+      }
+    } catch {}
+
     return cfg;
   } catch {
     _appOnline = false;
@@ -329,7 +355,7 @@ async function pollConfig() {
     for (const tab of tabs) {
       chrome.tabs.sendMessage(tab.id, {
         type: "CONFIG_UPDATE",
-        config: _cachedConfig,
+        config: _configForTab(tab.id),
       }).catch(() => {});
     }
   }
@@ -394,8 +420,39 @@ async function runInPageContext(tabId, fnString, args) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "GET_CONFIG") {
     // Luôn fetch fresh để đảm bảo custom_fields và mọi thay đổi mới nhất
+    const tabId = sender?.tab?.id || msg.tabId;
     fetchConfig().then(cfg => {
-      sendResponse({ ok: !!cfg, config: cfg || _cachedConfig, appOnline: _appOnline });
+      const tabCfg = tabId ? _configForTab(tabId) : (cfg || _cachedConfig);
+      sendResponse({ ok: !!cfg, config: tabCfg, appOnline: _appOnline });
+    });
+    return true;
+  }
+
+  // Popup set slot cho tab
+  if (msg.type === "SET_TAB_SLOT") {
+    const { tabId, slotIndex } = msg;
+    if (tabId != null) {
+      if (slotIndex < 0) {
+        _tabSlot.delete(tabId);
+      } else {
+        _tabSlot.set(tabId, slotIndex);
+      }
+      // Gửi config mới vào tab ngay
+      const tabCfg = _configForTab(tabId);
+      if (tabCfg) {
+        chrome.tabs.sendMessage(tabId, { type: "CONFIG_UPDATE", config: tabCfg }).catch(() => {});
+      }
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  // Popup hỏi danh sách slots + slot đang active của tab
+  if (msg.type === "GET_SLOTS") {
+    const tabId = msg.tabId;
+    sendResponse({
+      slots: _cachedSlots,
+      activeSlot: tabId != null ? (_tabSlot.get(tabId) ?? -1) : -1,
     });
     return true;
   }

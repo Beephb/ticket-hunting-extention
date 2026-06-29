@@ -283,8 +283,47 @@ async function checkContentScript() {
   }
 }
 
+async function initSlotSelector(currentTab) {
+  const sel = document.getElementById("slot-select");
+  if (!sel || !currentTab) return;
+
+  // Lấy danh sách slots + slot đang active của tab này
+  const res = await new Promise(resolve => {
+    chrome.runtime.sendMessage({ type: "GET_SLOTS", tabId: currentTab.id }, r => resolve(r || {}));
+  });
+
+  const slots = res.slots || [];
+  const activeSlot = res.activeSlot ?? -1;
+
+  // Build options
+  sel.innerHTML = `<option value="-1">— Config chung —</option>`;
+  slots.forEach((slot, i) => {
+    const opt = document.createElement("option");
+    opt.value = i;
+    opt.textContent = slot.name || `Slot ${i + 1}`;
+    sel.appendChild(opt);
+  });
+  sel.value = activeSlot;
+
+  sel.addEventListener("change", () => {
+    const slotIndex = parseInt(sel.value);
+    chrome.runtime.sendMessage({
+      type: "SET_TAB_SLOT",
+      tabId: currentTab.id,
+      slotIndex,
+    }, () => {
+      // Lấy config đã merge slot từ background (không fetch /config global)
+      chrome.runtime.sendMessage({ type: "GET_CONFIG", tabId: currentTab.id }, res => {
+        if (res?.config) renderConfig(res.config, currentTab._detectedPlatform);
+      });
+    });
+  });
+}
+
 async function init() {
+  const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const activePlatform = await detectActivePlatform();
+  if (currentTab) currentTab._detectedPlatform = activePlatform;
   renderPlatformTabs(activePlatform);
 
   const cfg = await fetchConfig();
@@ -304,6 +343,9 @@ async function init() {
     status.textContent = "Desktop App chưa chạy (port 9279)";
     addLog("⚠️ Không kết nối được App — hãy mở main.py");
   }
+
+  // Init slot selector
+  await initSlotSelector(currentTab);
 
   // Kiểm tra content script
   await checkContentScript();
@@ -345,6 +387,10 @@ setInterval(syncTimeOffset, 30000);
 setInterval(async () => {
   const activePlatform = await detectActivePlatform();
   renderPlatformTabs(activePlatform);
-  const cfg = await fetchConfig();
-  if (cfg) renderConfig(cfg, activePlatform);
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab) {
+    chrome.runtime.sendMessage({ type: "GET_CONFIG", tabId: tab.id }, res => {
+      if (res?.config) renderConfig(res.config, activePlatform);
+    });
+  }
 }, 5000);

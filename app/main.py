@@ -176,6 +176,9 @@ DEFAULT_CONFIG = {
         "ticketbox": _default_seat_cfg(),
         "ctiket": _default_seat_cfg(),
     },
+    # Seat slots — mỗi slot là 1 bộ auto_seat độc lập (per-tab override)
+    # Format: [{"name": "Slot 1", "auto_seat": {...}}, ...]
+    "seat_slots": [],
 }
 
 _PLATFORM_KEY_MAP = {"1Zone": "1zone", "Ticketbox": "ticketbox", "Ctiket": "ctiket"}
@@ -215,6 +218,20 @@ def load_config():
         cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
         for k, v in _default_seat_cfg().items():
             cfg["auto_seat"][pk].setdefault(k, v)
+
+    # Đảm bảo seat_slots tồn tại
+    cfg.setdefault("seat_slots", [])
+    for slot in cfg["seat_slots"]:
+        slot.setdefault("name", "Slot")
+        slot.setdefault("auto_seat", {
+            "1zone": _default_seat_cfg(),
+            "ticketbox": _default_seat_cfg(),
+            "ctiket": _default_seat_cfg(),
+        })
+        for pk in ("1zone", "ticketbox", "ctiket"):
+            slot["auto_seat"].setdefault(pk, _default_seat_cfg())
+            for k, v in _default_seat_cfg().items():
+                slot["auto_seat"][pk].setdefault(k, v)
 
     return cfg
 
@@ -279,6 +296,10 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/config":
             _ext_last_ping_ts = time.time()
             self._send_json(200, load_config())
+        elif self.path == "/slots":
+            _ext_last_ping_ts = time.time()
+            cfg = load_config()
+            self._send_json(200, {"slots": cfg.get("seat_slots", [])})
         elif self.path == "/ping":
             _ext_last_ping_ts = time.time()
             self._send_json(200, {"ok": True})
@@ -378,6 +399,19 @@ class _Handler(BaseHTTPRequestHandler):
             if _app_ref:
                 _app_ref.after(0, _app_ref.load_config_to_ui)
             self._send_json(200, {"ok": True})
+        elif self.path == "/slots":
+            # POST /slots — update toàn bộ danh sách slots
+            # Body: {"slots": [...]}
+            slots = data.get("slots")
+            if isinstance(slots, list):
+                cfg = load_config()
+                cfg["seat_slots"] = slots
+                save_config(cfg)
+                if _app_ref:
+                    _app_ref.after(0, _app_ref._reload_slots_ui)
+                self._send_json(200, {"ok": True})
+            else:
+                self._send_json(400, {"error": "slots must be array"})
         elif self.path == "/solve":
             # Captcha solver endpoint — được gọi bởi puzzle-solver.js + rotation-solver.js
             result = _solve_captcha(data)
@@ -767,6 +801,7 @@ class App(ctk.CTk):
         self.resizable(True, True)
         self._cfg = load_config()
         self._seat_map_rows = []
+        self._slot_rows = []
         self._build_ui()
         self.load_config_to_ui()
         self._api_server = start_api_server()
@@ -924,28 +959,61 @@ class App(ctk.CTk):
             def set(self, val): self._outer._select_platform_tab(val, _save_prev=False)
         self.sel_platform = _FakePlatformVar(self)
 
-        # Mode — display tiếng Việt, internal value vẫn seat_zone/seat_map
+        # ── Seat Slots ────────────────────────────────────────────────────────
+        ctk.CTkFrame(f, height=1, fg_color="#1e293b"
+                     ).grid(row=1, column=0, padx=16, pady=(0, 6), sticky="ew")
+
+        slot_header = ctk.CTkFrame(f, fg_color="transparent")
+        slot_header.grid(row=2, column=0, padx=16, pady=(0, 4), sticky="ew")
+        slot_header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(slot_header, text="⚙️  Config Slots (per-tab)",
+                     font=("Arial", 11, "bold"), text_color="#94a3b8"
+                     ).grid(row=0, column=0, sticky="w")
+
+        slot_btn_frame = ctk.CTkFrame(slot_header, fg_color="transparent")
+        slot_btn_frame.grid(row=0, column=1, sticky="e")
+
+        ctk.CTkButton(slot_btn_frame, text="＋", width=28, height=24,
+                      fg_color="#14532d", hover_color="#166534", text_color="#86efac",
+                      font=("Arial", 12, "bold"), corner_radius=6,
+                      command=self._add_slot
+                      ).grid(row=0, column=0, padx=(0, 4))
+
+        ctk.CTkLabel(slot_header,
+                     text="Extension chọn slot per-tab qua popup",
+                     font=("Arial", 9), text_color="#475569"
+                     ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        # Scrollable list slots
+        self._slots_list_frame = ctk.CTkFrame(f, fg_color="transparent")
+        self._slots_list_frame.grid(row=3, column=0, padx=16, pady=(0, 4), sticky="ew")
+        self._slots_list_frame.grid_columnconfigure(0, weight=1)
+        self._slot_rows = []  # list of (name_var, slot_dict, row_frame)
+
+        ctk.CTkFrame(f, height=1, fg_color="#1e293b"
+                     ).grid(row=4, column=0, padx=16, pady=(4, 6), sticky="ew")
         self.lbl_mode = ctk.CTkLabel(f, text="Kiểu chọn ghế", font=("Arial", 11), text_color=C_MUTED)
-        self.lbl_mode.grid(row=2, column=0, padx=16, pady=(0,0), sticky="w")
+        self.lbl_mode.grid(row=5, column=0, padx=16, pady=(0,0), sticky="w")
         self.sel_mode = ctk.CTkOptionMenu(
             f, values=[MODE_LABEL_ZONE, MODE_LABEL_MAP],
             command=self._on_mode_change, font=("Arial", 12)
         )
-        self.sel_mode.grid(row=3, column=0, padx=16, pady=(2,8), sticky="ew")
+        self.sel_mode.grid(row=6, column=0, padx=16, pady=(2,8), sticky="ew")
 
         ctk.CTkFrame(f, height=1, fg_color=C_BORDER
-                     ).grid(row=4, column=0, padx=16, pady=4, sticky="ew")
+                     ).grid(row=7, column=0, padx=16, pady=4, sticky="ew")
 
         # Dynamic area
         self.dynamic_frame = ctk.CTkFrame(f, fg_color="transparent")
-        self.dynamic_frame.grid(row=5, column=0, padx=0, pady=0, sticky="ew")
+        self.dynamic_frame.grid(row=8, column=0, padx=0, pady=0, sticky="ew")
         self.dynamic_frame.grid_columnconfigure(0, weight=1)
 
         # Số lượng + bật bot
         self.lbl_qty = ctk.CTkLabel(f, text="Số lượng vé", font=("Arial", 11), text_color=C_MUTED)
-        self.lbl_qty.grid(row=6, column=0, padx=16, pady=(8,0), sticky="w")
+        self.lbl_qty.grid(row=9, column=0, padx=16, pady=(8,0), sticky="w")
         self.inp_qty = ctk.CTkEntry(f, placeholder_text="VD: 2", font=("Arial", 12))
-        self.inp_qty.grid(row=7, column=0, padx=16, pady=(2,10), sticky="ew")
+        self.inp_qty.grid(row=10, column=0, padx=16, pady=(2,10), sticky="ew")
 
         # Allow partial purchase — mua thiếu vẫn OK
         self.var_allow_partial = ctk.BooleanVar(value=False)
@@ -954,8 +1022,111 @@ class App(ctk.CTk):
             variable=self.var_allow_partial,
             font=("Arial", 11), text_color="#94a3b8",
         )
-        self.chk_allow_partial.grid(row=8, column=0, padx=16, pady=(0,4), sticky="w")
+        self.chk_allow_partial.grid(row=11, column=0, padx=16, pady=(0,4), sticky="w")
 
+
+    # ── Slot management ───────────────────────────────────────────────────────
+
+    def _reload_slots_ui(self):
+        """Đọc slots từ config và re-render danh sách."""
+        cfg = load_config()
+        slots = cfg.get("seat_slots", [])
+        for _, _, rf in self._slot_rows:
+            try: rf.destroy()
+            except Exception: pass
+        self._slot_rows = []
+        for i, slot in enumerate(slots):
+            self._render_slot_row(i, slot)
+        # Ẩn frame nếu không có slot nào (tránh khoảng trống)
+        if slots:
+            self._slots_list_frame.grid()
+        else:
+            self._slots_list_frame.grid_remove()
+
+    def _render_slot_row(self, idx, slot):
+        """Vẽ 1 dòng slot: [tên] [copy] [xóa]"""
+        rf = ctk.CTkFrame(self._slots_list_frame, fg_color="#111827",
+                          corner_radius=6)
+        rf.grid(row=idx, column=0, pady=(0, 3), sticky="ew")
+        rf.grid_columnconfigure(0, weight=1)
+
+        name_var = ctk.StringVar(value=slot.get("name", f"Slot {idx+1}"))
+
+        name_entry = ctk.CTkEntry(rf, textvariable=name_var, font=("Arial", 11),
+                                   fg_color="#1e293b", border_color="#334155",
+                                   height=28)
+        name_entry.grid(row=0, column=0, padx=(6,4), pady=4, sticky="ew")
+
+        def _save_name(event=None, i=idx, nv=name_var):
+            cfg = load_config()
+            slots = cfg.get("seat_slots", [])
+            if i < len(slots):
+                slots[i]["name"] = nv.get().strip() or f"Slot {i+1}"
+                cfg["seat_slots"] = slots
+                save_config(cfg)
+
+        name_entry.bind("<FocusOut>", _save_name)
+        name_entry.bind("<Return>", _save_name)
+
+        ctk.CTkButton(rf, text="📋", width=28, height=28, font=("Arial", 11),
+                      fg_color="#1e3a5f", hover_color="#1e40af", text_color="#93c5fd",
+                      corner_radius=6,
+                      command=lambda i=idx: self._copy_slot(i)
+                      ).grid(row=0, column=1, padx=(0, 2), pady=4)
+
+        ctk.CTkButton(rf, text="✕", width=28, height=28, font=("Arial", 11),
+                      fg_color="#7f1d1d", hover_color="#991b1b", text_color="#fca5a5",
+                      corner_radius=6,
+                      command=lambda i=idx: self._remove_slot(i)
+                      ).grid(row=0, column=2, padx=(0, 6), pady=4)
+
+        self._slot_rows.append((name_var, slot, rf))
+
+    def _add_slot(self):
+        """Thêm slot mới — clone từ config global hiện tại."""
+        import copy
+        cfg = load_config()
+        slots = cfg.get("seat_slots", [])
+        new_slot = {
+            "name": f"Slot {len(slots) + 1}",
+            "auto_seat": copy.deepcopy(cfg["auto_seat"]),
+        }
+        slots.append(new_slot)
+        cfg["seat_slots"] = slots
+        save_config(cfg)
+        self._reload_slots_ui()
+        self.add_log(f"✅ Đã thêm {new_slot['name']} (clone từ config hiện tại)", "green")
+
+    def _copy_slot(self, idx):
+        """Nhân bản 1 slot."""
+        import copy
+        cfg = load_config()
+        slots = cfg.get("seat_slots", [])
+        if idx >= len(slots):
+            return
+        src = slots[idx]
+        new_slot = {
+            "name": f"{src.get('name', f'Slot {idx+1}')} (copy)",
+            "auto_seat": copy.deepcopy(src["auto_seat"]),
+        }
+        slots.append(new_slot)
+        cfg["seat_slots"] = slots
+        save_config(cfg)
+        self._reload_slots_ui()
+        self.add_log(f"📋 Đã nhân bản {src.get('name', f'Slot {idx+1}')}", "green")
+
+    def _remove_slot(self, idx):
+        """Xóa slot theo index."""
+        cfg = load_config()
+        slots = cfg.get("seat_slots", [])
+        if idx >= len(slots):
+            return
+        name = slots[idx].get("name", f"Slot {idx+1}")
+        slots.pop(idx)
+        cfg["seat_slots"] = slots
+        save_config(cfg)
+        self._reload_slots_ui()
+        self.add_log(f"🗑 Đã xóa {name}", "yellow")
 
     def _build_dynamic_zone(self):
         for w in self.dynamic_frame.winfo_children():
@@ -1373,6 +1544,7 @@ class App(ctk.CTk):
         self._load_seat_config_for(platform)
 
         self._ui_ready = True  # từ giờ _on_platform_change mới được phép auto-save platform cũ
+        self._reload_slots_ui()
         self._update_status()
 
     def _save_config(self):
