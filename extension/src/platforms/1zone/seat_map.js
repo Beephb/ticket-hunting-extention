@@ -213,29 +213,26 @@ function pickAdjacent(tickets, quantity, numOrder) {
     (grouped[key] = grouped[key] || []).push(t);
   }
 
-  const numRank = n => {
-    if (!numOrder || !numOrder.length) return 999999;
-    const i = numOrder.indexOf(n);
-    return i >= 0 ? i : 999999;
-  };
-
   for (const group of Object.values(grouped)) {
     if (group.length < quantity) continue;
     const byNum = {};
     for (const t of group) byNum[t.codeNum] = t;
-    const nums = Object.keys(byNum).map(Number).sort((a,b) => a-b);
+    const nums = Object.keys(byNum).map(Number).sort((a, b) => a - b);
 
-    // Parity groups (bước 2)
+    // Bước 1: Sequential (liền kề thật sự: 1,2,3 hoặc 2,3,4...)
+    // Ưu tiên này vì rạp đánh số liên tục (hàng D: 1,2,3,4,5...)
     for (const start of nums) {
-      const up = Array.from({length: quantity}, (_, i) => start + 2*i);
-      if (up.every(n => byNum[n])) return up.map(n => byNum[n]);
-      const down = Array.from({length: quantity}, (_, i) => start - 2*i);
-      if (down.every(n => byNum[n])) return down.map(n => byNum[n]);
+      const seq = Array.from({ length: quantity }, (_, i) => start + i);
+      if (seq.every(n => byNum[n])) return seq.map(n => byNum[n]);
     }
-    // Sequential fallback
+
+    // Bước 2: Parity fallback (cùng lẻ hoặc cùng chẵn kề nhau: 1,3,5 hoặc 2,4,6...)
+    // Dùng khi rạp chia lẻ/chẵn theo 2 phía (hàng A: 2,4,6,8... / hàng C: 1,3,5,7...)
     for (const start of nums) {
-      const up = Array.from({length: quantity}, (_, i) => start + i);
+      const up = Array.from({ length: quantity }, (_, i) => start + 2 * i);
       if (up.every(n => byNum[n])) return up.map(n => byNum[n]);
+      const down = Array.from({ length: quantity }, (_, i) => start - 2 * i);
+      if (down.every(n => byNum[n])) return down.map(n => byNum[n]);
     }
   }
   return [];

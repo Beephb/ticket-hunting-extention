@@ -385,6 +385,30 @@ async function pollConfig() {
     }
   } catch {}
 
+  // ── Hunt-all poll — broadcast HUNT_NOW nếu desktop yêu cầu ────────────────
+  try {
+    if (_appOnline) {
+      const huntRes = await apiFetch("/hunt-all", { signal: AbortSignal.timeout(1500) });
+      if (huntRes.ok) {
+        const d = await huntRes.json();
+        if (d?.pending) {
+          const allTabs = await chrome.tabs.query({
+            url: [
+              "https://ticket.1zone.vn/*",
+              "https://queue.1zone.vn/*",
+              "https://ticketbox.vn/*",
+              "https://cticket.vn/*",
+            ]
+          });
+          for (const tab of allTabs) {
+            chrome.tabs.sendMessage(tab.id, { type: "HUNT_NOW" }).catch(() => {});
+          }
+          qLog(`[BG] 🚀 HUNT_ALL → broadcast HUNT_NOW vào ${allTabs.length} tab`);
+        }
+      }
+    }
+  } catch {}
+
   setTimeout(pollConfig, CONFIG_POLL_MS);
 }
 
@@ -573,9 +597,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       // Xóa cache để injectTab không bị skip do dedup
       _injected.delete(tabId);
-      injectTab(tabId, tab.url)
-        .then(() => sendResponse({ ok: true }))
-        .catch(() => sendResponse({ ok: false }));
+      // Clear hunt flag trước khi inject lại — tránh auto chạy seat khi reconnect
+      chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => { try { sessionStorage.removeItem("__svp_hunt_done__"); } catch {} },
+      }).catch(() => {}).finally(() => {
+        injectTab(tabId, tab.url)
+          .then(() => sendResponse({ ok: true }))
+          .catch(() => sendResponse({ ok: false }));
+      });
     });
     return true;
   }

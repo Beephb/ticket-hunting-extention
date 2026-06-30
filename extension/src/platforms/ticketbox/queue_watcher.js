@@ -14,6 +14,131 @@
   const API_BASE = "https://api-v2.ticketbox.vn";
 
   /**
+   * Poll waiting room cho đến khi countdown = 0 (browser sẽ tự navigate sang /queue/).
+   * Chỉ cần show UI countdown — không cần handle transition vì Ticketbox JS tự làm.
+   *
+   * @param {string} showingId
+   * @param {string} captchaToken  — JWT từ /capt/check
+   * @param {object} [opts]
+   * @param {number} [opts.timeoutMs=3600000]  — timeout tổng (default 60 phút)
+   * @returns {Promise<{ok:boolean, reason?:string}>}
+   */
+  async function waitForWaitingRoom(showingId, captchaToken, opts = {}) {
+    const { timeoutMs = 3600000 } = opts;
+    const tokenMgr = window.__SVP_TB_TOKEN__;
+    if (!tokenMgr) return { ok: false, reason: "token_mgr_missing" };
+
+    const API_BASE_URL = "https://api-v2.ticketbox.vn";
+    const deadline = Date.now() + timeoutMs;
+
+    if (window.svpLog) window.svpLog(`⏳ Waiting room showing ${showingId} — bắt đầu poll...`, "yellow");
+    if (typeof window.showIndicator === "function")
+      window.showIndicator("🟡 Phòng chờ...", "Đang chờ mở bán", "#facc15");
+
+    let prevT = null; // rolling t param từ response trước
+    let pollCount = 0;
+
+    while (Date.now() < deadline) {
+      if (window.svpShouldStop?.()) {
+        if (window.svpLog) window.svpLog("🛑 Dừng waiting room poll theo stop signal", "red");
+        return { ok: false, reason: "stopped" };
+      }
+
+      // Build URL: lần đầu không có t, các lần sau pass t từ response trước
+      const url = prevT
+        ? `${API_BASE_URL}/queue/v1/showing/${showingId}/status?version=v2&t=${prevT}&step=waiting_room`
+        : `${API_BASE_URL}/queue/v1/showing/${showingId}/status?version=v2&step=waiting_room`;
+
+      const baseHeaders = tokenMgr.buildHeaders();
+      const headers = {
+        ...baseHeaders,
+        "x-tb-captcha-token": captchaToken,
+      };
+
+      let intervalMs = 10000;
+
+      try {
+        const res = await fetch(url, {
+          method: "GET",
+          credentials: "include",
+          headers,
+          signal: AbortSignal.timeout(8000),
+        });
+
+        if (!res.ok) {
+          if (window.svpLog) window.svpLog(`⚠️ Waiting room API HTTP=${res.status} — thử lại...`, "yellow");
+          await new Promise(r => setTimeout(r, 5000));
+          continue;
+        }
+
+        const json = await res.json();
+        const data = json?.data;
+        const status = data?.status;
+        const countdown = data?.countdown ?? null;
+        pollCount++;
+
+        // Lưu t để dùng cho poll tiếp theo
+        if (data?.t) prevT = data.t;
+        intervalMs = (data?.intervalTimeSeconds || 10) * 1000;
+
+        if (window.svpLog && pollCount % 3 === 1) {
+          // Log mỗi 3 lần để không spam
+          window.svpLog(`⏳ Waiting room: countdown=${countdown}s (poll #${pollCount})`, "yellow");
+        }
+
+        if (typeof window.showIndicator === "function") {
+          const countdownTxt = countdown !== null ? `Còn ${countdown}s` : "Đang chờ...";
+          window.showIndicator("🟡 Phòng chờ", countdownTxt, "#facc15");
+        }
+
+        window.dispatchEvent(new CustomEvent("svp_queue_update", {
+          detail: { status: "WAITING_ROOM", countdown }
+        }));
+
+        // Khi countdown = 0, Ticketbox JS sẽ tự navigate sang /queue/
+        // Bot không cần làm gì — chỉ cần dừng poll và chờ
+        if (countdown === 0) {
+          if (window.svpLog) window.svpLog("✅ Waiting room countdown = 0 — chờ browser navigate sang /queue/...", "green");
+          if (typeof window.showIndicator === "function")
+            window.showIndicator("🚀 Mở bán!", "Đang vào hàng đợi...", "#22c55e");
+          return { ok: true };
+        }
+
+        // Nếu status không phải WAITING_ROOM (edge case)
+        if (status && status !== "WAITING_ROOM") {
+          if (window.svpLog) window.svpLog(`⚠️ Waiting room status lạ: "${status}" — dừng poll`, "yellow");
+          return { ok: true }; // vẫn ok, để flow tiếp tục
+        }
+
+      } catch (e) {
+        if (window.svpLog) window.svpLog(`⚠️ Waiting room poll lỗi: ${e.message}`, "yellow");
+        intervalMs = 5000;
+      }
+
+      // Đợi intervalMs (chia nhỏ để check stop signal)
+      const waitEnd = Date.now() + intervalMs;
+      while (Date.now() < waitEnd) {
+        if (window.svpShouldStop?.()) return { ok: false, reason: "stopped" };
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
+    if (window.svpLog) window.svpLog("⏰ Waiting room timeout — dừng bot", "red");
+    return { ok: false, reason: "timeout" };
+  }
+
+  /**
+   * Lấy showingId từ URL waiting room: /waiting-room/{showingId}
+   */
+  function getShowingIdFromWaitingRoomUrl() {
+    try {
+      const m = location.href.match(/\/waiting-room\/(\d{6,})/);
+      if (m) return m[1];
+    } catch {}
+    return null;
+  }
+
+  /**
    * Poll queue cho đến khi status = BOOKING hoặc timeout.
    *
    * @param {string} showingId
@@ -168,8 +293,10 @@
 
   window.__SVP_TB_QUEUE__ = {
     waitForBookingTurn,
+    waitForWaitingRoom,
     isOnQueuePage,
     getShowingIdFromQueueUrl,
+    getShowingIdFromWaitingRoomUrl,
   };
 
   if (window.svpLog) window.svpLog("⏳ TB queue watcher loaded", "blue");

@@ -85,6 +85,9 @@ _scan_pending = False          # Desktop đang chờ kết quả scan
 _scan_result  = None           # Kết quả trả về từ extension
 _scan_event   = threading.Event()  # Signal khi có kết quả
 
+# ── Hunt all state ────────────────────────────────────────────────────────────
+_hunt_all_pending = False      # Desktop yêu cầu broadcast HUNT_NOW tất cả tab
+
 # ── Mode label mapping (UI tiếng Việt ↔ internal key) ────────────────────────
 MODE_LABEL_ZONE = "Chọn zone (khu)"
 MODE_LABEL_MAP  = "Chọn ghế cụ thể"
@@ -300,6 +303,14 @@ class _Handler(BaseHTTPRequestHandler):
             _ext_last_ping_ts = time.time()
             cfg = load_config()
             self._send_json(200, {"slots": cfg.get("seat_slots", [])})
+        elif self.path == "/hunt-all":
+            global _hunt_all_pending
+            _ext_last_ping_ts = time.time()
+            if _hunt_all_pending:
+                _hunt_all_pending = False
+                self._send_json(200, {"pending": True})
+            else:
+                self._send_json(200, {"pending": False})
         elif self.path == "/ping":
             _ext_last_ping_ts = time.time()
             self._send_json(200, {"ok": True})
@@ -853,21 +864,29 @@ class App(ctk.CTk):
 
         # Bottom buttons
         btn_frame = ctk.CTkFrame(left, fg_color="transparent")
-        btn_frame.grid(row=2, column=0, padx=14, pady=(6,14), sticky="ew")
+        btn_frame.grid(row=2, column=0, padx=14, pady=(6,6), sticky="ew")
         btn_frame.grid_columnconfigure((0,1), weight=1)
 
         ctk.CTkButton(btn_frame, text="💾  Lưu config", command=self._save_config,
                       fg_color="#1d4ed8", hover_color="#1e40af", height=36
                       ).grid(row=0, column=0, padx=(0,4), sticky="ew")
-        ctk.CTkButton(btn_frame, text="🗑  Xoá log", command=self._clear_log,
-                      fg_color="#374151", hover_color="#4b5563", height=36
+        ctk.CTkButton(btn_frame, text="🚀  Chạy tất cả tab", command=self._run_all_tabs,
+                      fg_color="#7c3aed", hover_color="#6d28d9", height=36
                       ).grid(row=0, column=1, padx=(4,0), sticky="ew")
 
-        # Nút xuất log
-        ctk.CTkButton(left, text="📤  Xuất log ra file .txt", command=self._export_log,
+        # Nút xuất log + xóa log
+        log_btn_frame = ctk.CTkFrame(left, fg_color="transparent")
+        log_btn_frame.grid(row=3, column=0, padx=14, pady=(0,14), sticky="ew")
+        log_btn_frame.grid_columnconfigure((0,1), weight=1)
+
+        ctk.CTkButton(log_btn_frame, text="📤  Xuất log", command=self._export_log,
                       fg_color="#1e293b", hover_color="#334155", height=30,
                       font=("Arial", 11), text_color=C_MUTED
-                      ).grid(row=3, column=0, padx=14, pady=(0,14), sticky="ew")
+                      ).grid(row=0, column=0, padx=(0,4), sticky="ew")
+        ctk.CTkButton(log_btn_frame, text="🗑  Xoá log", command=self._clear_log,
+                      fg_color="#1e293b", hover_color="#334155", height=30,
+                      font=("Arial", 11), text_color=C_MUTED
+                      ).grid(row=0, column=1, padx=(4,0), sticky="ew")
 
         # ── Right panel: Log ──
         right = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=16)
@@ -1023,6 +1042,15 @@ class App(ctk.CTk):
             font=("Arial", 11), text_color="#94a3b8",
         )
         self.chk_allow_partial.grid(row=11, column=0, padx=16, pady=(0,4), sticky="w")
+
+        # Require adjacent — ghế liền nhau
+        self.var_require_adjacent = ctk.BooleanVar(value=True)
+        self.chk_require_adjacent = ctk.CTkCheckBox(
+            f, text="Bắt buộc ghế liền nhau (bỏ tick → mua ghế rời cũng OK)",
+            variable=self.var_require_adjacent,
+            font=("Arial", 11), text_color="#94a3b8",
+        )
+        self.chk_require_adjacent.grid(row=12, column=0, padx=16, pady=(0,8), sticky="w")
 
 
     # ── Slot management ───────────────────────────────────────────────────────
@@ -1256,8 +1284,9 @@ class App(ctk.CTk):
         mode = "seat_zone" if platform == "Ctiket" else _label_to_mode(self.sel_mode.get())
 
         seat_cfg = self._cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
-        seat_cfg["seat_mode"]     = mode
-        seat_cfg["allow_partial"] = self.var_allow_partial.get()
+        seat_cfg["seat_mode"]        = mode
+        seat_cfg["allow_partial"]    = self.var_allow_partial.get()
+        seat_cfg["require_adjacent"] = self.var_require_adjacent.get()
 
         if platform == "Ctiket":
             self._refresh_ctiket_rows()
@@ -1327,6 +1356,7 @@ class App(ctk.CTk):
         if platform != "Ctiket":
             _set(self.inp_qty, str(as_.get("quantity", 1)))
         self.var_allow_partial.set(bool(as_.get("allow_partial", False)))
+        self.var_require_adjacent.set(bool(as_.get("require_adjacent", True)))
 
     def _style_platform_tabs(self):
         for p, btn in self._platform_buttons.items():
@@ -1572,8 +1602,9 @@ class App(ctk.CTk):
             qty = 1
 
         seat_cfg = cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
-        seat_cfg["seat_mode"]     = mode
-        seat_cfg["allow_partial"] = self.var_allow_partial.get()
+        seat_cfg["seat_mode"]        = mode
+        seat_cfg["allow_partial"]    = self.var_allow_partial.get()
+        seat_cfg["require_adjacent"] = self.var_require_adjacent.get()
 
         if platform == "Ctiket":
             self._refresh_ctiket_rows()
@@ -1615,6 +1646,12 @@ class App(ctk.CTk):
         self.log_box.configure(state="disabled")
         self.log_box.see("end")
         logger.info(msg)
+
+    def _run_all_tabs(self):
+        """Báo hiệu background broadcast HUNT_NOW vào tất cả tab."""
+        global _hunt_all_pending
+        _hunt_all_pending = True
+        self.add_log("🚀 Đã gửi lệnh Chạy tất cả tab!", "green")
 
     def _export_log(self):
         from tkinter import filedialog

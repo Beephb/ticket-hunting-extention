@@ -421,3 +421,6 @@ function stopHuntTicketbox() {
   _huntPollerStopTb = true;
   svpLog("🛑 Đã dừng hunt Ticketbox", "yellow");
 }
+
+// Expose stop checker để seat_map/seat_zone retry loop check được
+window.__SVP_TB_HUNT_STOP = () => _huntStopTb;

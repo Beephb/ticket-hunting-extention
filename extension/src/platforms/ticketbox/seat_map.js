@@ -685,62 +685,68 @@ async function runTicketboxSeatMap(cfg) {
             } catch (e) {
               svpLog(`⚠️ Lưu bookingCode fail: ${e.message}`, "yellow");
             }
+            await new Promise(r => setTimeout(r, 100));
             location.href = `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`;
             return true;
           }
-          svpLog(`⚠️ API-first fail (${apiResult.error?.reason || apiResult.error?.message}) — fallback Konva click`, "yellow");
-        }
 
-        // Navigate đúng showing nếu cần (fallback path)
-        const curUrl = location.href;
-        if (!curUrl.includes(`/bookings/${showingId}/`)) {
-          svpLog(`↪️ Chuyển UI sang showing: ${showingId}`, "blue");
-          location.href = `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/select-ticket`;
-          await sleep(1500);
-        }
+          // ── Xử lý khi API fail ──────────────────────────────────────────────
+          const isSoldOut = (apiResult.raw?.data?.result?.invalidItems || [])
+            .some(i => i.code === "item_is_sold_out");
 
-        // Click từng ghế
-        // FIX: allow_partial-aware — không early-exit khi 1 ghế fail,
-        // tiếp tục thử các ghế còn lại; chỉ fail-section khi không có ghế nào click được
-        let clickedCount = 0;
-        const failedSeats = [];
-        for (const seat of selected) {
-          const ok = await clickSeatOnCanvas(seat, flattenAvailable(sectionDetail));
-          if (ok) {
-            clickedCount++;
-          } else {
-            failedSeats.push(seat.label);
-            if (!allowPartial) {
-              lastErr = "không click được ghế trên UI";
-              break;
+          if (isSoldOut) {
+            svpLog(`⏳ Ghế đang bị giữ (item_is_sold_out) — retry đến khi nhả...`, "yellow");
+            let retryN = 0;
+            while (true) {
+              if (window.__SVP_TB_HUNT_STOP?.()) {
+                svpLog(`🛑 Dừng retry sold_out theo yêu cầu`, "yellow");
+                return false;
+              }
+              await sleep(1500);
+              if (window.__SVP_TB_HUNT_STOP?.()) {
+                svpLog(`🛑 Dừng retry sold_out theo yêu cầu`, "yellow");
+                return false;
+              }
+              retryN++;
+              svpLog(`🔄 Retry submit lần ${retryN}...`, "blue");
+              const r = await reserve.submitTicketInfo({ eventId: info.eventId, showingId, date, items, timeoutMs: 2000 });
+              if (r.success) {
+                svpLog(`🎫 Reserve OK sau ${retryN} lần retry — bookingCode=${r.bookingCode}`, "green");
+                if (window.svpEvent) {
+                  window.svpEvent("reserve.success", {
+                    platform: "ticketbox", mode: "map",
+                    bookingCode: r.bookingCode, expireIn: r.expireIn,
+                    showingId: String(showingId), eventId: String(info.eventId),
+                    sectionName: secName, ticketName: ttName,
+                    seats: selected.map(s => s.label),
+                    quantity: actualQty, quantityTarget: quantity,
+                    method: "api-retry", durationMs: r.durationMs,
+                    checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`,
+                  });
+                }
+                try { localStorage.setItem(`bookingCode_${showingId}`, JSON.stringify(r.bookingCode)); } catch {}
+                await new Promise(r2 => setTimeout(r2, 100));
+                location.href = `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`;
+                return true;
+              }
+              const stillSoldOut = (r.raw?.data?.result?.invalidItems || []).some(i => i.code === "item_is_sold_out");
+              if (!stillSoldOut) {
+                svpLog(`❌ Lỗi khác sau retry: ${r.error?.message} — dừng`, "red");
+                return false;
+              }
             }
           }
-        }
-        const minClick = allowPartial ? 1 : selected.length;
-        if (clickedCount < minClick) {
-          lastErr = lastErr || `chỉ click được ${clickedCount}/${selected.length} ghế (cần ≥${minClick})`;
-          svpLog(`⚠️ ${lastErr}; thử option tiếp theo`, "yellow");
+
+          // Lỗi khác → log rõ lý do, thử section tiếp theo
+          lastErr = `API fail: ${apiResult.error?.errorCode || ""} ${apiResult.error?.message || apiResult.error?.reason || "unknown"}`.trim();
+          svpLog(`❌ API-first fail — ${lastErr} | section=${secName} | thử section tiếp theo`, "red");
           continue;
         }
-        if (failedSeats.length) {
-          svpLog(`ℹ️ Mua thiếu OK: click được ${clickedCount}/${selected.length} ghế. Fail: ${failedSeats.join(", ")}`, "yellow");
-        }
-
-        // Click Thanh toán
-        const okPay = await clickCheckoutButtonTbMap();
-        if (!okPay) {
-          svpLog("⚠️ Không click được nút thanh toán. Ghế đã chọn, mày có thể bấm tay.", "yellow");
-          return true;
-        }
-
-        await sleep(800);
-        svpLog("✅ Đã chọn ghế và bấm Tiếp tục. Dừng ở bước form để mày tự xử lý.", "green");
-        return true;
       }
     }
   }
 
-  if (lastErr) svpLog(`❌ Đã tìm được ghế nhưng UI click fail. Lỗi cuối: ${lastErr}`, "red");
+  if (lastErr) svpLog(`❌ Không reserve được ghế. Lỗi cuối: ${lastErr}`, "red");
   else svpLog("❌ Không tìm được ghế theo ưu tiên. Dừng, không chọn bừa.", "red");
   return false;
 }

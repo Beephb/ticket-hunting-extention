@@ -691,32 +691,60 @@ async function runTicketboxSeatZone(cfg) {
         await _navigateToCheckoutAfterApi(info, apiZone._matchedDate, apiResult.bookingCode);
         return true;
       }
-      svpLog(`⚠️ API-first fail (${apiResult?.error?.reason || apiResult?.error?.message}) — fallback Konva`, "yellow");
-    }
 
-    // Click Konva zone (fallback hoặc default nếu không đủ data)
-    const clicked = await clickZoneKonvaTb(target, apiZone);
-    if (!clicked) {
-      lastErr = `không click được zone: ${target}`;
-      svpLog(`⚠️ ${lastErr}; thử ưu tiên tiếp theo`, "yellow");
+      // ── Xử lý khi API fail ────────────────────────────────────────────────
+      const isSoldOut = (apiResult?.raw?.data?.result?.invalidItems || [])
+        .some(i => i.code === "item_is_sold_out");
+
+      if (isSoldOut) {
+        svpLog(`⏳ Zone đang bị giữ (item_is_sold_out) — retry đến khi nhả...`, "yellow");
+        let retryN = 0;
+        while (true) {
+          if (window.__SVP_TB_HUNT_STOP?.()) {
+            svpLog(`🛑 Dừng retry sold_out theo yêu cầu`, "yellow");
+            return false;
+          }
+          await sleep(1500);
+          if (window.__SVP_TB_HUNT_STOP?.()) {
+            svpLog(`🛑 Dừng retry sold_out theo yêu cầu`, "yellow");
+            return false;
+          }
+          retryN++;
+          svpLog(`🔄 Retry submit zone lần ${retryN}...`, "blue");
+          const r = await _tryApiReserveZone(info, apiZone, apiQty);
+          if (r.success) {
+            svpLog(`🎫 Zone reserve OK sau ${retryN} lần retry — bookingCode=${r.bookingCode}`, "green");
+            if (window.svpEvent) {
+              window.svpEvent("reserve.success", {
+                platform: "ticketbox", mode: "zone",
+                bookingCode: r.bookingCode, expireIn: r.expireIn,
+                showingId: String(info.showingId), eventId: String(info.eventId),
+                zoneName: apiZone.name, quantity: apiQty,
+                method: "api-retry", durationMs: r.durationMs,
+                checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${info.showingId}/question-form?date=${apiZone._matchedDate}`,
+              });
+            }
+            await _navigateToCheckoutAfterApi(info, apiZone._matchedDate, r.bookingCode);
+            return true;
+          }
+          const stillSoldOut = (r.raw?.data?.result?.invalidItems || []).some(i => i.code === "item_is_sold_out");
+          if (!stillSoldOut) {
+            svpLog(`❌ Lỗi khác sau retry zone: ${r.error?.message} — dừng`, "red");
+            return false;
+          }
+        }
+      }
+
+      // Lỗi khác → log rõ lý do, thử target tiếp theo
+      lastErr = `API fail: ${apiResult?.error?.errorCode || ""} ${apiResult?.error?.message || apiResult?.error?.reason || "unknown"}`.trim();
+      svpLog(`❌ API-first fail — ${lastErr} | zone=${target} | thử ưu tiên tiếp theo`, "red");
       continue;
     }
 
-    // Set quantity (truyền allowPartial — nếu zone hết vé, accept số lượng available)
-    if (!await setTbModalQuantity(quantity, allowPartial)) {
-      svpLog("⚠️ Không set được số lượng. Popup đã mở đúng zone.", "yellow");
-      return true; // popup mở đúng, để user tự xử
-    }
-
-    // Click Tiếp tục
-    if (!await clickTbModalContinue()) {
-      svpLog("⚠️ Không click được Tiếp tục. Số lượng đã đúng.", "yellow");
-      return true;
-    }
-
-    await sleep(800);
-    svpLog("✅ Đã chọn zone + số lượng + bấm Tiếp tục. Nếu captcha hiện, kéo tay.", "green");
-    return true;
+    // Không đủ data để gọi API (thiếu ticketTypeId hoặc sectionId)
+    lastErr = `không đủ data API cho zone: ${target} (ticketTypeId=${apiZone?.ticketTypeId} sectionId=${apiZone?.sectionId})`;
+    svpLog(`❌ ${lastErr}`, "red");
+    continue;
   }
 
   svpLog(`❌ Không chọn được seat_zone. Lỗi cuối: ${lastErr}`, "red");
@@ -748,6 +776,9 @@ async function _navigateToCheckoutAfterApi(info, date, bookingCode) {
   } catch (e) {
     svpLog(`⚠️ Lưu bookingCode vào localStorage fail: ${e.message}`, "yellow");
   }
+
+  // Delay nhỏ để đảm bảo localStorage flush xong trước khi navigate
+  await new Promise(r => setTimeout(r, 100));
 
   // Navigate sang question-form (runner.js sẽ auto-fill)
   const targetUrl = `https://ticketbox.vn/events/${info.eventId}/bookings/${info.showingId}/question-form?date=${date}`;

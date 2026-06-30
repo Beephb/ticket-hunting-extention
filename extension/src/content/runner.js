@@ -24,6 +24,11 @@ window.__SVP_INJECTED__ = true;
 const _HUNT_FLAG_KEY = "__svp_hunt_done__";
 const _HUNT_FLAG_TTL = 90 * 60 * 1000; // 90 phút — đủ cover queue dài nhất
 
+// Flag riêng đánh dấu "user đã chủ động bấm 1 nút trong popup" (RUN_NOW / HUNT_NOW / HUNT_ONLY).
+// Dùng để chặn maybeRun() tự kích hoạt seat-selection khi chỉ đơn thuần SPA-navigate
+// (vd: user tự bấm xem trang chọn vé trên Ticketbox mà không hề mở popup SVP).
+const _RUN_TRIGGERED_KEY = "__svp_run_triggered__";
+
 let _cfg = null;
 let _running = false;
 
@@ -56,6 +61,19 @@ function checkAndClearHuntFlag() {
   return age < _HUNT_FLAG_TTL;
 }
 
+// User đã bấm nút trong popup chưa? (RUN_NOW / HUNT_NOW / HUNT_ONLY)
+// Dùng cùng TTL với hunt flag — đủ cover các bước SPA-nav trung gian.
+function setRunTriggered() {
+  sessionStorage.setItem(_RUN_TRIGGERED_KEY, String(Date.now()));
+}
+
+function isRunTriggered() {
+  const val = sessionStorage.getItem(_RUN_TRIGGERED_KEY);
+  if (!val) return false;
+  const age = Date.now() - parseInt(val);
+  return age < _HUNT_FLAG_TTL;
+}
+
 // ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -69,17 +87,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
   if (msg.type === "RUN_NOW") {
+    setRunTriggered();
     maybeRun(true);
     sendResponse({ ok: true });
     return;
   }
   if (msg.type === "HUNT_NOW") {
+    setRunTriggered();
     if (!_cfg) { initConfig().then(() => startHunt(true)); }
     else startHunt(true);
     sendResponse({ ok: true });
     return;
   }
   if (msg.type === "HUNT_ONLY") {
+    // KHÔNG setRunTriggered() — "Chỉ hunt" nghĩa là không tự auto chọn ghế.
     if (!_cfg) { initConfig().then(() => startHunt(false)); }
     else startHunt(false);
     sendResponse({ ok: true });
@@ -387,6 +408,14 @@ async function maybeRun(force = false) {
   const isBookingPage = pageType === "booking_1zone" || pageType === "select_ticket_tb" || pageType === "buy_ctiket";
   if (!isBookingPage) {
     svpLog(`ℹ️ Trang hiện tại (${pageType}) không phải trang chọn vé — chờ điều hướng`, "gray");
+    return;
+  }
+
+  // Chỉ tự động chọn ghế nếu user đã chủ động bấm 1 nút trong popup
+  // (RUN_NOW / HUNT_NOW / HUNT_ONLY) hoặc caller truyền force=true.
+  // Tránh việc SPA-navigate đơn thuần (vd user tự bấm xem vé) cũng kích hoạt full flow.
+  if (!force && !isRunTriggered()) {
+    svpLog(`ℹ️ Trang chọn vé (${pageType}) nhưng chưa bấm Hunt/Run trên popup — không tự chạy`, "gray");
     return;
   }
 

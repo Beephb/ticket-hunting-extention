@@ -95,6 +95,8 @@ function detectPageType() {
   const path = location.pathname;
   if (/\/booking\//.test(path)) return "booking_1zone";
   if (/\/events\/\d+\/bookings\/\d+\/select-ticket/.test(path)) return "select_ticket_tb";
+  // Ticketbox prequeue: /waiting-room/{showingId}
+  if (/\/waiting-room\/\d+/.test(path)) return "waiting_room_tb";
   // Ctiket: /buy/{eid}/queue (hàng chờ) vs /buy/{eid} (trang chọn vé)
   if (/\/buy\/[^/?#]+\/queue/.test(path)) return "queue_ctiket";
   if (/\/buy\/[^/?#]+/.test(path)) return "buy_ctiket";

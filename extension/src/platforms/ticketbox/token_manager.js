@@ -1,5 +1,5 @@
 // src/platforms/ticketbox/token_manager.js
-// Ticketbox token lifecycle — READ-ONLY strategy (Stage 4.2 conclusion).
+// Ticketbox token lifecycle — IFRAME REFRESH strategy (Stage 4.4, verified 2026-06-30).
 //
 // Discovery 2026-05-24: Ticketbox lưu tokens trong COOKIES:
 //   TBoxJWT          = access_token (RS256, TTL 120s, kind=access_token)
@@ -8,11 +8,14 @@
 //   userId           = user_id (vd: 4445570)
 //   deviceId         = device_id (vd: 50ab8f7bdbec3b3ebe6be7cab3c86625)
 //
-// Frontend Ticketbox tự refresh access_token mỗi ~90s (cần signature do JS bundle
-// compute, extension không bypass được). Extension chỉ:
-//   - Đọc current TBoxJWT từ cookie
-//   - Build headers cho reserve API
-//   - Nếu reserve trả 401 → log warning, không tự refresh (frontend sẽ tự handle)
+// Discovery 2026-06-30: gọi thẳng api-movie.ticketbox.vn/v1/users/login/refresh_token
+// rotate TBoxRefresh nhưng frontend Ticketbox giữ bản cache cũ trong JS runtime
+// (không đồng bộ cookie mới) → mismatch khi token tiếp theo hết hạn → logout.
+// Đã verify KHÔNG dùng cách này được nữa.
+//
+// Giải pháp đúng: dùng iframe ẩn load https://ticketbox.vn/ — để chính frontend
+// Ticketbox tự refresh nội bộ (đồng bộ đúng state của nó). Chỉ hiệu quả khi
+// access_token ĐÃ HẾT HẠN (không phải sắp hết) — verified bằng test thực tế.
 
 (function() {
   if (window.__SVP_TB_TOKEN__) return;
@@ -100,6 +103,17 @@
     } else {
       _state.accessTokenExp = null;
     }
+
+    // Fallback cuối: lấy device_id từ captcha token trong localStorage (tkc_*)
+    if (!_state.deviceId) {
+      try {
+        const captchaKey = Object.keys(localStorage).find(k => k.startsWith("tkc_"));
+        if (captchaKey) {
+          const captchaPayload = _parseJwt(localStorage.getItem(captchaKey));
+          if (captchaPayload?.device_id) _state.deviceId = captchaPayload.device_id;
+        }
+      } catch {}
+    }
   }
 
   // ── Public API ───────────────────────────────────────────────────────────────
@@ -141,9 +155,10 @@
 
     /**
      * Pre-flight check trước Phase 2 reserve.
-     * Nếu token sắp/đã expire → trigger frontend refresh bằng cách dispatch
-     * fetch dummy. Frontend axios interceptor sẽ catch 401 và auto refresh
-     * cookie TBoxJWT mới.
+     * Nếu token đã hết hạn → trigger iframe ẩn để frontend Ticketbox tự
+     * refresh nội bộ. CHỈ hiệu quả khi token đã chết hẳn (verified 2026-06-30),
+     * không hiệu quả khi token chỉ "sắp" hết — nên nếu còn vài giây margin,
+     * preFlightCheck trả ok=false luôn thay vì cố trigger sớm vô ích.
      */
     async preFlightCheck() {
       _refreshState();
@@ -158,14 +173,17 @@
         ? _state.accessTokenExp * 1000 - Date.now()
         : -1;
 
-      if (remainingMs < 0) {
-        if (window.svpLog) window.svpLog(`⚠️ TB access_token EXPIRED ${-Math.round(remainingMs/1000)}s ago — thử trigger frontend refresh`, "yellow");
-      } else {
-        if (window.svpLog) window.svpLog(`⚠️ TB access_token còn ${Math.round(remainingMs/1000)}s — sắp expire, trigger refresh`, "yellow");
+      if (remainingMs >= 0) {
+        // Còn sống nhưng dưới margin — iframe refresh không hiệu quả lúc này,
+        // báo caller retry sau thay vì trigger iframe vô ích.
+        if (window.svpLog) window.svpLog(`⚠️ TB access_token còn ${Math.round(remainingMs/1000)}s — sắp expire`, "yellow");
+        return { ok: false, token: _state.accessToken, reason: "expiring_soon", remainingMs };
       }
 
-      // Try trigger frontend refresh
-      const refreshed = await this.triggerRefresh(2500);
+      if (window.svpLog) window.svpLog(`⚠️ TB access_token EXPIRED ${-Math.round(remainingMs/1000)}s ago — trigger iframe refresh`, "yellow");
+
+      // Try trigger refresh qua iframe ẩn
+      const refreshed = await this.triggerRefresh();
       if (refreshed) {
         _refreshState();
         return { ok: this.isValid(), token: _state.accessToken, reason: "refreshed" };
@@ -175,48 +193,66 @@
     },
 
     /**
-     * Trigger frontend Ticketbox tự refresh access_token.
-     * Cách: dispatch fetch dummy đến API thường gọi (initialize). Frontend
-     * axios interceptor sẽ thấy token sắp/đã hết → tự call /refresh_token.
-     * Sau đó cookie TBoxJWT update → extension đọc lại.
+     * Trigger frontend Ticketbox tự refresh access_token bằng iframe ẩn.
+     * Verified 2026-06-30: chỉ hoạt động khi access_token ĐÃ HẾT HẠN
+     * (không phải sắp hết). iframe load lại https://ticketbox.vn/, frontend
+     * JS instance trong iframe tự thấy token chết → tự gọi refresh nội bộ
+     * → cookie TBoxJWT + TBoxRefresh (domain .ticketbox.vn, dùng chung)
+     * được cập nhật, tab chính đọc lại thấy token mới.
      *
-     * @param {number} maxWaitMs - tối đa chờ refresh complete
+     * KHÔNG dùng cách gọi thẳng /refresh_token API (đã test, rotate
+     * TBoxRefresh nhưng frontend giữ bản cache cũ trong JS runtime →
+     * mismatch → logout khi F5 lần sau). Iframe an toàn vì để chính
+     * frontend Ticketbox tự đồng bộ state nội bộ của nó.
+     *
+     * @param {number} maxWaitMs - tối đa chờ iframe load + refresh complete
      * @returns {Promise<boolean>} true nếu token đã refresh, false nếu fail/timeout
      */
-    async triggerRefresh(maxWaitMs = 2500) {
+    async triggerRefresh(maxWaitMs = 12000) {
       const oldToken = _state.accessToken;
-      try {
-        // Call API nhẹ với credentials: include
-        // Axios interceptor của Ticketbox sẽ catch nếu cần refresh
-        await fetch("https://api-v2.ticketbox.vn/event/api/v1/applications/initialize?platform=web", {
-          method: "GET",
-          credentials: "include",
-          headers: {
-            "Accept": "application/json, text/plain, */*",
-            "Origin": "https://ticketbox.vn",
-            "Referer": "https://ticketbox.vn/",
-          },
-          signal: AbortSignal.timeout(2000),
-        }).catch(() => {});  // Ignore error, only care về cookie update
-      } catch {}
 
-      // Poll cookie change (refresh đổi TBoxJWT)
+      // Chỉ hiệu quả khi token đã hết hạn — nếu còn sống thì bỏ qua sớm
+      if (this.isValid(0)) {
+        return true; // còn valid, không cần refresh
+      }
+
+      let iframe = null;
+      try {
+        iframe = document.createElement("iframe");
+        iframe.src = "https://ticketbox.vn/";
+        iframe.style.display = "none";
+        document.body.appendChild(iframe);
+      } catch (e) {
+        if (window.svpLog) window.svpLog(`❌ TB refresh: tạo iframe lỗi — ${e.message}`, "red");
+        return false;
+      }
+
+      // Poll cookie change (iframe tự refresh đổi TBoxJWT)
       const deadline = Date.now() + maxWaitMs;
+      let ok = false;
       while (Date.now() < deadline) {
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 500));
         _refreshState();
-        if (_state.accessToken !== oldToken) {
-          if (window.svpLog) {
-            const remainingS = _state.accessTokenExp
-              ? Math.round((_state.accessTokenExp * 1000 - Date.now()) / 1000)
-              : "?";
-            window.svpLog(`✅ TB token đã refresh — remaining=${remainingS}s`, "green");
-          }
-          return true;
+        if (_state.accessToken && _state.accessToken !== oldToken && this.isValid(0)) {
+          ok = true;
+          break;
         }
       }
 
-      if (window.svpLog) window.svpLog("⚠️ Trigger refresh: cookie không update sau 2.5s — fail", "yellow");
+      // Dọn iframe
+      try { iframe.remove(); } catch {}
+
+      if (ok) {
+        if (window.svpLog) {
+          const remainingS = _state.accessTokenExp
+            ? Math.round((_state.accessTokenExp * 1000 - Date.now()) / 1000)
+            : "?";
+          window.svpLog(`✅ TB token đã refresh (iframe) — remaining=${remainingS}s`, "green");
+        }
+        return true;
+      }
+
+      if (window.svpLog) window.svpLog(`⚠️ TB refresh (iframe): cookie không update sau ${Math.round(maxWaitMs/1000)}s — fail`, "yellow");
       return false;
     },
 
