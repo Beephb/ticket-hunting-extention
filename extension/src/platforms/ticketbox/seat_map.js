@@ -87,19 +87,31 @@ function parsePriorityTbMap(target) {
   let raw = String(target || "").trim();
   if (!raw) return { type: "empty", raw };
 
+  // Tách zone prefix "Khu|rest" → zoneFilter = "Khu", rest = phần còn lại
+  // (giống hệt 1Zone — FIX bug: trước đây Ticketbox không tách "|" nên khi
+  // UI gửi "VIP A|M:18", cả cụm "VIPA|M" bị hiểu nhầm thành 1 tên hàng ghế
+  // và không bao giờ khớp được gì).
+  let zoneFilter = null;
+  let rest = raw;
+  if (raw.includes("|")) {
+    const idx = raw.indexOf("|");
+    zoneFilter = raw.slice(0, idx).trim();
+    rest = raw.slice(idx + 1).trim();
+  }
+
   // Tách parity suffix (:odd / :even cuối)
   let parity = null;
-  const lowerRaw = raw.toLowerCase();
-  if (lowerRaw.endsWith(":odd")) {
+  const lowerRest = rest.toLowerCase();
+  if (lowerRest.endsWith(":odd")) {
     parity = "odd";
-    raw = raw.slice(0, -4);
-  } else if (lowerRaw.endsWith(":even")) {
+    rest = rest.slice(0, -4);
+  } else if (lowerRest.endsWith(":even")) {
     parity = "even";
-    raw = raw.slice(0, -5);
+    rest = rest.slice(0, -5);
   }
-  raw = raw.trim();
+  rest = rest.trim();
 
-  const compact = raw.toUpperCase().replace(/\s/g, "");
+  const compact = rest.toUpperCase().replace(/\s/g, "");
 
   if (compact.includes(":")) {
     const [left, right] = compact.split(":", 2);
@@ -113,21 +125,27 @@ function parsePriorityTbMap(target) {
       if (!numSpec.ranges.length && !numSpec.values.size) numSpec = null;
     }
     if (rows.length) {
-      return { type: "range", raw, rows, numSpec, parity };
+      return { type: "range", raw, rows, numSpec, zoneFilter, parity };
     }
   }
 
-  const exact = [];
-  let okExact = true;
-  for (const token of compact.split(",")) {
-    if (!token) continue;
-    const m = token.match(/^([A-Z]+)-?(\d+)$/);
-    if (!m) { okExact = false; break; }
-    exact.push({ row: m[1], num: parseInt(m[2]), label: `${m[1]}-${parseInt(m[2])}` });
+  // exact chỉ thử khi KHÔNG có zoneFilter (giống 1Zone — tránh match nhầm
+  // tên khu dài kiểu "ZONE2" thành mã ghế)
+  if (!zoneFilter) {
+    const exact = [];
+    let okExact = true;
+    for (const token of compact.split(",")) {
+      if (!token) continue;
+      const m = token.match(/^([A-Z]+)-?(\d+)$/);
+      if (!m) { okExact = false; break; }
+      exact.push({ row: m[1], num: parseInt(m[2]), label: `${m[1]}-${parseInt(m[2])}` });
+    }
+    if (exact.length && okExact) return { type: "exact", raw, seats: exact, parity };
   }
-  if (exact.length && okExact) return { type: "exact", raw, seats: exact, parity };
 
-  return { type: "text", raw, norm: normTbMap(raw), parity };
+  // Fallback: text match — dùng "rest" nếu có (sau khi bóc zone prefix),
+  // hoặc raw gốc nếu không có zone prefix (case chỉ gõ tên khu đơn thuần)
+  return { type: "text", raw, norm: normTbMap(rest || raw), zoneFilter, parity };
 }
 
 // Helper: filter seatNum theo parity (odd/even/null)
@@ -547,21 +565,30 @@ async function clickCheckoutButtonTbMap() {
 
 async function runTicketboxSeatMap(cfg) {
   const aseat = cfg.auto_seat?.["ticketbox"] || cfg.auto_seat || {};
-  const priorityTargets = aseat.zone_priority || aseat.priority_targets || [];
-  const quantity = parseInt(aseat.quantity) || 1;
+
+  // Đọc seat_map_priorities mới [{raw, quantity}] — mỗi dòng ưu tiên có SL riêng.
+  // Fallback config cũ: zone_priority (list string) + 1 quantity chung cho tất cả.
+  const rawPriorities = aseat.seat_map_priorities || aseat.zone_priority || aseat.priority_targets || [];
+  const qtyOld = Math.max(1, parseInt(aseat.quantity) || 1);
+  const priorityItems = rawPriorities
+    .map(p => (p && typeof p === "object")
+      ? { raw: String(p.raw || ""), quantity: Math.max(1, parseInt(p.quantity) || qtyOld) }
+      : { raw: String(p || ""), quantity: qtyOld })
+    .filter(p => p.raw);
+
   const requireAdjacent = aseat.require_adjacent !== false;
   const allowSplit = !!aseat.allow_split_seats;
   const allowPartial = !!aseat.allow_partial;  // NEW
   const seatNumberMode = String(aseat.seat_number_mode || "auto").toLowerCase();
 
-  svpLog(`🪑 Ticketbox seat_map | SL=${quantity} | dãy=${seatNumberMode}${allowPartial ? " | cho phép mua thiếu" : ""}`, "yellow");
+  svpLog(`🪑 Ticketbox seat_map | priority=${JSON.stringify(priorityItems)} | dãy=${seatNumberMode}${allowPartial ? " | cho phép mua thiếu" : ""}`, "yellow");
 
   const info = extractTicketboxInfo();
   if (!info.eventId || !info.showingId) {
     svpLog("❌ Không tìm được eventId/showingId Ticketbox", "red");
     return false;
   }
-  if (!priorityTargets.length) {
+  if (!priorityItems.length) {
     svpLog("❌ Chưa nhập ưu tiên ghế/vé", "red");
     return false;
   }
@@ -605,18 +632,29 @@ async function runTicketboxSeatMap(cfg) {
     if (!sections.length) { svpLog(`⚠️ Seatmap ${showingId} không có section hợp lệ`, "yellow"); continue; }
     svpLog(`🗺️ Seatmap OK | showing=${showingId} | sections=${sections.length}`, "green");
 
-    for (let pidx = 0; pidx < priorityTargets.length; pidx++) {
-      const target = priorityTargets[pidx];
+    for (let pidx = 0; pidx < priorityItems.length; pidx++) {
+      const target = priorityItems[pidx].raw;
+      const quantity = priorityItems[pidx].quantity;
       const parsed = parsePriorityTbMap(target);
-      svpLog(`🎯 Ưu tiên ${pidx+1}: ${target} | type=${parsed.type}`, "yellow");
+      svpLog(`🎯 Ưu tiên ${pidx+1}: ${target} | SL=${quantity} | type=${parsed.type}`, "yellow");
 
       let candidateSections = sections;
+      // FIX bug: lọc theo zoneFilter cho MỌI type (trước đây chỉ lọc khi
+      // type==="text" — khiến zoneFilter kèm theo Hàng/Ghế bị bỏ qua hoàn
+      // toàn, không giới hạn được khu).
+      if (parsed.zoneFilter) {
+        candidateSections = candidateSections.filter(s =>
+          sectionMatchesText(s, ticketTypes[s.ticketTypeId], normTbMap(parsed.zoneFilter))
+        );
+      }
       if (parsed.type === "text") {
-        candidateSections = sections.filter(s => sectionMatchesText(s, ticketTypes[s.ticketTypeId], parsed.norm));
-        if (!candidateSections.length) {
-          svpLog(`⚠️ Không thấy section khớp: ${target}`, "yellow");
-          continue;
-        }
+        candidateSections = candidateSections.filter(s =>
+          sectionMatchesText(s, ticketTypes[s.ticketTypeId], parsed.norm)
+        );
+      }
+      if (!candidateSections.length) {
+        svpLog(`⚠️ Không thấy section khớp: ${target}`, "yellow");
+        continue;
       }
 
       for (const sec of candidateSections) {

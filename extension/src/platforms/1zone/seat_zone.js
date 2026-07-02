@@ -535,16 +535,27 @@ async function clickPayAndWait1Z(calendarId) {
 
 async function run1ZoneSeatZone(cfg) {
   const aseat = cfg.auto_seat?.["1zone"] || cfg.auto_seat || {};
-  const priorities = (aseat.zone_priority || aseat.priority_targets || []).map(p => String(p).trim()).filter(Boolean);
-  const quantity = Math.max(1, parseInt(aseat.quantity) || 1);
   const allowPartial = !!aseat.allow_partial;
 
-  if (!priorities.length) {
+  // Đọc items mới [{zone, quantity}] — mỗi khu có SL riêng.
+  // Fallback config cũ: zone_priority (list tên) + 1 quantity chung cho tất cả.
+  let zoneItems = [];
+  if (aseat.items && aseat.items.length) {
+    zoneItems = aseat.items
+      .map(i => ({ zone: String(i.zone || "").trim(), quantity: Math.max(1, parseInt(i.quantity) || 1) }))
+      .filter(i => i.zone);
+  } else {
+    const zones = (aseat.zone_priority || aseat.priority_targets || []).map(p => String(p).trim()).filter(Boolean);
+    const qtyOld = Math.max(1, parseInt(aseat.quantity) || 1);
+    zoneItems = zones.map(z => ({ zone: z, quantity: qtyOld }));
+  }
+
+  if (!zoneItems.length) {
     svpLog("❌ Chưa nhập khu ưu tiên cho 1Zone seat_zone", "red");
     return false;
   }
 
-  svpLog(`🎟️ 1Zone seat_zone KONVA_NATIVE | ưu tiên=${JSON.stringify(priorities)} | SL=${quantity}${allowPartial ? " (cho phép mua thiếu)" : ""}`, "yellow");
+  svpLog(`🎟️ 1Zone seat_zone KONVA_NATIVE | ưu tiên=${JSON.stringify(zoneItems)}${allowPartial ? " (cho phép mua thiếu)" : ""}`, "yellow");
 
   const info = extract1ZZoneInfo();
   svpLog(`🔎 eventId=${info.eventId} | calendarId=${info.calendarId}`, "blue");
@@ -577,11 +588,12 @@ async function run1ZoneSeatZone(cfg) {
   svpLog(`📋 Zone còn vé: ${formatZoneList1Z(zones)}`, "blue");
 
   let lastErr = null;
-  for (let idx = 0; idx < priorities.length; idx++) {
+  for (let idx = 0; idx < zoneItems.length; idx++) {
     if (svpShouldStop()) { svpLog("🛑 Stop signal", "yellow"); return false; }
 
-    const wanted = priorities[idx];
-    svpLog(`🎯 Thử zone ưu tiên ${idx+1}: ${wanted}`, "yellow");
+    const wanted = zoneItems[idx].zone;
+    const quantity = zoneItems[idx].quantity;
+    svpLog(`🎯 Thử zone ưu tiên ${idx+1}: ${wanted} | SL=${quantity}`, "yellow");
 
     // Tìm zone match
     let zone = matchZone1Z(zones, wanted, quantity);

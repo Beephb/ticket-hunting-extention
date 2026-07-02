@@ -194,7 +194,24 @@ function renderConfig(cfg, activePlatform) {
 
   document.getElementById("cfg-platform").textContent = activePlatform || "—";
   document.getElementById("cfg-mode").textContent = as_.seat_mode || "—";
-  const zones = (as_.zone_priority || as_.priority_targets || []).slice(0, 3).join(", ") || "—";
+
+  // FIX: seat_map_priorities luôn tồn tại (mặc định []) — mảng rỗng vẫn
+  // "truthy" trong JS nên "||" không tự fallback được. Phải check .length
+  // rõ ràng, nếu không Ctiket/1Zone (mode seat_zone, seat_map_priorities=[])
+  // sẽ luôn hiện "—" dù zone_priority có dữ liệu thật.
+  const rawList = (as_.seat_map_priorities && as_.seat_map_priorities.length)
+    ? as_.seat_map_priorities
+    : (as_.zone_priority || as_.priority_targets || []);
+  // Mỗi phần tử có thể là string (khu, format cũ) hoặc object {raw, quantity}
+  // (dòng ghế cụ thể, format mới) — luôn hiển thị "tên/raw (SLx)" dễ đọc.
+  const zones = rawList.slice(0, 3).map(item => {
+    if (item && typeof item === "object") {
+      const raw = item.raw || "?";
+      const qty = item.quantity != null ? item.quantity : 1;
+      return `${raw} (SL${qty})`;
+    }
+    return String(item);
+  }).join(", ") || "—";
   document.getElementById("cfg-zones").textContent = zones;
   document.getElementById("cfg-qty").textContent = as_.quantity || 1;
 }

@@ -163,6 +163,7 @@ def _default_seat_cfg():
     return {
         "seat_mode": "seat_zone",
         "zone_priority": [],
+        "items": [],  # [{zone, quantity}] — ưu tiên khu vực kèm SL riêng từng khu (seat_zone mode)
         "seat_map_priorities": [],  # [{zone, row, seat_range, parity}]
         "quantity": 1,
         "require_adjacent": True,
@@ -647,8 +648,9 @@ class SeatMapRow(ctk.CTkFrame):
     def __init__(self, parent, on_delete, **kwargs):
         super().__init__(parent, fg_color=C_PANEL2, corner_radius=8, **kwargs)
         self.on_delete = on_delete
-        # 4 columns: Khu | Hàng | Ghế số | Lẻ/Chẵn   + nút xóa
+        # 5 columns: Khu | Hàng | Ghế số | Lẻ/Chẵn | SL   + nút xóa
         self.grid_columnconfigure((0,1,2,3), weight=1)
+        self.grid_columnconfigure(4, weight=0)
 
         # Khu
         ctk.CTkLabel(self, text="Khu", font=("Arial", 10), text_color=C_MUTED
@@ -681,11 +683,18 @@ class SeatMapRow(ctk.CTkFrame):
         self.sel_parity.set("Bất kỳ")
         self.sel_parity.grid(row=1, column=3, padx=2, pady=(0,6), sticky="ew")
 
-        # Nút xóa (column 4)
+        # SL — số lượng riêng cho dòng ưu tiên này
+        ctk.CTkLabel(self, text="SL", font=("Arial", 10), text_color=C_MUTED
+                     ).grid(row=0, column=4, padx=2, pady=(6,0), sticky="w")
+        self.inp_qty = ctk.CTkEntry(self, placeholder_text="1", height=30,
+                                     font=("Arial", 11), width=50)
+        self.inp_qty.grid(row=1, column=4, padx=2, pady=(0,6), sticky="ew")
+
+        # Nút xóa (column 5)
         ctk.CTkButton(self, text="✕", width=28, height=28, fg_color="#374151",
                       hover_color="#4b5563", font=("Arial", 11),
                       command=self._delete
-                      ).grid(row=0, column=4, rowspan=2, padx=(4,8), pady=4)
+                      ).grid(row=0, column=5, rowspan=2, padx=(4,8), pady=4)
 
     def _delete(self):
         self.destroy()
@@ -696,54 +705,85 @@ class SeatMapRow(ctk.CTkFrame):
         row   = self.inp_row.get().strip().upper()
         seat  = self.inp_seat.get().strip()
         parity_suffix = self._PARITY_TO_SUFFIX.get(self.sel_parity.get(), "")
+        try:
+            qty = int(self.inp_qty.get().strip())
+        except Exception:
+            qty = 1
+        qty = max(1, qty)
+
+        # FIX bug: có "Ghế số" nhưng bỏ trống "Hàng" → dòng này sẽ bị BỎ QUA
+        # khi lưu (không có Hàng thì không build được raw hợp lệ). Trước đây
+        # mất trắng không báo gì — giờ viền dòng chuyển ĐỎ để cảnh báo ngay
+        # trên UI (self._save_seat_config_for cũng log cảnh báo khi lưu).
+        if seat and not row:
+            self.configure(border_width=2, border_color="#ef4444")
+        else:
+            self.configure(border_width=0)
 
         # Build priority string theo format seat_map
         # Cú pháp mở rộng: <row>:<seat>[:odd|:even]
+        raw = ""
         if row and seat:
             s = f"{row}:{seat}"
             if parity_suffix:
                 s = f"{s}:{parity_suffix}"
-            if zone:
-                s = f"{zone}|{s}"
-            return s
+            raw = f"{zone}|{s}" if zone else s
         elif row and not seat:
             # Chỉ row + parity → "K:*:odd"
             if parity_suffix:
                 s = f"{row}:*:{parity_suffix}"
-                return f"{zone}|{s}" if zone else s
-            return f"{zone}|{row}" if zone else row
+                raw = f"{zone}|{s}" if zone else s
+            else:
+                raw = f"{zone}|{row}" if zone else row
         elif zone and not row and not seat:
-            return zone
-        return ""
+            raw = zone
+
+        if not raw:
+            return None
+        return {"raw": raw, "quantity": qty}
+
+    def has_orphan_seat(self):
+        """True nếu có 'Ghế số' nhưng bỏ trống 'Hàng' — dòng này bị bỏ qua khi lưu."""
+        return bool(self.inp_seat.get().strip() and not self.inp_row.get().strip())
 
     def set_value(self, val):
-        # Parse lại từ string
-        val = str(val or "")
-        if "|" in val:
-            zone_part, rest = val.split("|", 1)
+        # Chấp nhận dict mới {"raw":.., "quantity":..} hoặc string cũ (migrate)
+        if isinstance(val, dict):
+            raw = str(val.get("raw", ""))
+            qty = val.get("quantity", 1)
+        else:
+            raw = str(val or "")
+            qty = 1
+
+        self.inp_qty.delete(0, "end")
+        self.inp_qty.insert(0, str(max(1, int(qty) if str(qty).strip().isdigit() else 1)))
+
+        # Parse lại raw thành zone/row/seat/parity
+        if "|" in raw:
+            zone_part, rest = raw.split("|", 1)
             self.inp_zone.insert(0, zone_part)
-            val = rest
+            raw = rest
 
         # Detect parity suffix (:odd / :even cuối)
         parity_suffix = ""
         for suf in ("odd", "even"):
-            if val.endswith(f":{suf}"):
+            if raw.endswith(f":{suf}"):
                 parity_suffix = suf
-                val = val[: -(len(suf) + 1)]  # strip ":odd" hoặc ":even"
+                raw = raw[: -(len(suf) + 1)]  # strip ":odd" hoặc ":even"
                 break
         self.sel_parity.set(self._SUFFIX_TO_PARITY.get(parity_suffix, "Bất kỳ"))
 
-        if ":" in val:
-            r, s = val.split(":", 1)
+        if ":" in raw:
+            r, s = raw.split(":", 1)
             self.inp_row.insert(0, r)
             if s and s != "*":
                 self.inp_seat.insert(0, s)
-        elif val:
-            self.inp_zone.insert(0, val)
+        elif raw:
+            self.inp_zone.insert(0, raw)
 
 
-class CtiketZoneRow(ctk.CTkFrame):
-    """1 dòng ưu tiên zone cho Ctiket: Tên zone + Số lượng + nút xóa."""
+class ZoneQtyRow(ctk.CTkFrame):
+    """1 dòng ưu tiên zone (Tên khu + Số lượng riêng) — dùng chung cho 1Zone / Ticketbox / Ctiket."""
 
     def __init__(self, parent, on_delete, **kwargs):
         super().__init__(parent, fg_color=C_PANEL2, corner_radius=8, **kwargs)
@@ -812,6 +852,7 @@ class App(ctk.CTk):
         self.resizable(True, True)
         self._cfg = load_config()
         self._seat_map_rows = []
+        self._zone_priority_rows = []
         self._slot_rows = []
         self._build_ui()
         self.load_config_to_ui()
@@ -1157,19 +1198,48 @@ class App(ctk.CTk):
         self.add_log(f"🗑 Đã xóa {name}", "yellow")
 
     def _build_dynamic_zone(self):
+        """UI chọn zone (1Zone/Ticketbox): mỗi dòng có Tên zone + Số lượng riêng.
+        Lưu ý: đơn hàng vẫn chỉ mua từ 1 zone (zone đầu tiên còn đủ vé theo thứ tự
+        ưu tiên) — SL riêng từng dòng chỉ để biết muốn mua bao nhiêu NẾU zone đó
+        được chọn, không phải mua cộng dồn nhiều zone cùng lúc."""
         for w in self.dynamic_frame.winfo_children():
             w.destroy()
+        self._zone_priority_rows = []
 
-        ctk.CTkLabel(self.dynamic_frame, text="Ưu tiên khu vực (mỗi dòng 1 khu)",
+        ctk.CTkLabel(self.dynamic_frame, text="Ưu tiên khu vực",
                      font=("Arial", 11), text_color=C_MUTED
                      ).grid(row=0, column=0, padx=16, pady=(0,0), sticky="w")
         ctk.CTkLabel(self.dynamic_frame,
-                     text="Bot thử theo thứ tự từ trên xuống",
-                     font=("Arial", 10), text_color="#475569"
-                     ).grid(row=1, column=0, padx=16, pady=(0,2), sticky="w")
-        self.txt_priority = ctk.CTkTextbox(self.dynamic_frame, height=100,
-                                            font=("Arial", 12))
-        self.txt_priority.grid(row=2, column=0, padx=16, pady=(0,4), sticky="ew")
+                     text="Bot thử theo thứ tự từ trên xuống — mỗi khu có số lượng riêng (đơn hàng chỉ mua từ 1 khu)",
+                     font=("Arial", 10), text_color="#475569", wraplength=320
+                     ).grid(row=1, column=0, padx=16, pady=(0,4), sticky="w")
+
+        self.zone_rows_frame = ctk.CTkFrame(self.dynamic_frame, fg_color="transparent")
+        self.zone_rows_frame.grid(row=2, column=0, padx=16, pady=0, sticky="ew")
+        self.zone_rows_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkButton(self.dynamic_frame, text="＋  Thêm ưu tiên",
+                      fg_color=C_BORDER, hover_color="#1e293b",
+                      text_color=C_MUTED, font=("Arial", 11),
+                      command=self._add_zone_priority_row, height=30
+                      ).grid(row=3, column=0, padx=16, pady=(6,4), sticky="w")
+
+        self._add_zone_priority_row()
+
+    def _add_zone_priority_row(self, val=None):
+        row = ZoneQtyRow(self.zone_rows_frame, on_delete=self._refresh_zone_priority_rows)
+        row.grid(row=len(self._zone_priority_rows), column=0, pady=(0,4), sticky="ew")
+        if val:
+            row.set_value(val)
+        self._zone_priority_rows.append(row)
+
+    def _refresh_zone_priority_rows(self):
+        self._zone_priority_rows = [
+            w for w in self.zone_rows_frame.winfo_children()
+            if isinstance(w, ZoneQtyRow)
+        ]
+        for i, row in enumerate(self._zone_priority_rows):
+            row.grid(row=i, column=0, pady=(0,4), sticky="ew")
 
     def _build_dynamic_map(self):
         for w in self.dynamic_frame.winfo_children():
@@ -1180,7 +1250,7 @@ class App(ctk.CTk):
                      font=("Arial", 11), text_color=C_MUTED
                      ).grid(row=0, column=0, padx=16, pady=(0,2), sticky="w")
         ctk.CTkLabel(self.dynamic_frame,
-                     text="Để trống = bất kỳ  |  Hàng: M hoặc A-D  |  Ghế: 18 hoặc 15-20 hoặc 18,20",
+                     text="Để trống = bất kỳ  |  Hàng: M hoặc A-D  |  Ghế: 18 hoặc 15-20 hoặc 18,20  |  mỗi dòng có SL riêng",
                      font=("Arial", 10), text_color="#475569", wraplength=320
                      ).grid(row=1, column=0, padx=16, pady=(0,4), sticky="w")
 
@@ -1224,7 +1294,7 @@ class App(ctk.CTk):
         self._add_ctiket_zone_row()
 
     def _add_ctiket_zone_row(self, val=None):
-        row = CtiketZoneRow(self.ctiket_rows_frame, on_delete=self._refresh_ctiket_rows)
+        row = ZoneQtyRow(self.ctiket_rows_frame, on_delete=self._refresh_ctiket_rows)
         row.grid(row=len(self._ctiket_zone_rows), column=0, pady=(0,4), sticky="ew")
         if val:
             row.set_value(val)
@@ -1233,7 +1303,7 @@ class App(ctk.CTk):
     def _refresh_ctiket_rows(self):
         self._ctiket_zone_rows = [
             w for w in self.ctiket_rows_frame.winfo_children()
-            if isinstance(w, CtiketZoneRow)
+            if isinstance(w, ZoneQtyRow)
         ]
         for i, row in enumerate(self._ctiket_zone_rows):
             row.grid(row=i, column=0, pady=(0,4), sticky="ew")
@@ -1264,19 +1334,16 @@ class App(ctk.CTk):
         platform = self.sel_platform.get()
         if platform == "Ctiket":
             # Ctiket chỉ có seat_zone (GA theo khu, không có seatmap ghế cụ thể)
-            # → ẩn dropdown mode + ô số lượng chung (mỗi zone có qty riêng)
+            # → ẩn dropdown mode (ô số lượng chung được _update_qty_field_visibility xử lý)
             self.sel_mode.set(MODE_LABEL_ZONE)
             self.lbl_mode.grid_remove()
             self.sel_mode.grid_remove()
-            self.lbl_qty.grid_remove()
-            self.inp_qty.grid_remove()
         else:
             self.lbl_mode.grid()
             self.sel_mode.grid()
-            self.lbl_qty.grid()
-            self.inp_qty.grid()
 
         self._load_seat_config_for(platform)
+        self._update_qty_field_visibility()
 
     def _save_seat_config_for(self, platform):
         """Lưu phần auto_seat[platform] hiện tại trên UI vào self._cfg (chưa ghi file)."""
@@ -1296,26 +1363,28 @@ class App(ctk.CTk):
             seat_cfg["zone_priority"] = [i["zone"] for i in items]
             seat_cfg["quantity"] = sum(i["quantity"] for i in items)
         elif mode == "seat_zone":
-            try:
-                qty = int(self.inp_qty.get().strip())
-            except Exception:
-                qty = 1
-            seat_cfg["quantity"] = qty
-            zones = [z.strip() for z in self.txt_priority.get("1.0", "end").splitlines() if z.strip()]
-            seat_cfg["zone_priority"]    = zones
-            seat_cfg["priority_targets"] = zones
+            self._refresh_zone_priority_rows()
+            items = [r.get_value() for r in self._zone_priority_rows if r.get_value()]
+            seat_cfg["items"] = items
+            # Backward compat: extension cũ đọc zone_priority (list tên) + quantity chung
+            seat_cfg["zone_priority"]    = [i["zone"] for i in items]
+            seat_cfg["priority_targets"] = [i["zone"] for i in items]
+            seat_cfg["quantity"]         = sum(i["quantity"] for i in items) if items else 1
             seat_cfg["seat_map_priorities"] = []
         else:
-            try:
-                qty = int(self.inp_qty.get().strip())
-            except Exception:
-                qty = 1
-            seat_cfg["quantity"] = qty
             self._refresh_seat_rows()
             priorities = [r.get_value() for r in self._seat_map_rows if r.get_value()]
             seat_cfg["seat_map_priorities"] = priorities
+            # Backward compat: extension cũ đọc zone_priority (list string) + quantity chung
             seat_cfg["zone_priority"]        = priorities
             seat_cfg["priority_targets"]     = priorities
+            seat_cfg["quantity"] = max([p["quantity"] for p in priorities], default=1)
+            orphan_n = sum(1 for r in self._seat_map_rows if r.has_orphan_seat())
+            if orphan_n:
+                self.add_log(
+                    f"⚠️ {orphan_n} dòng có 'Ghế số' nhưng thiếu 'Hàng' — "
+                    f"(các) dòng này bị BỎ QUA khi lưu. Điền 'Hàng' để dòng có hiệu lực.",
+                    "yellow")
 
     def _load_seat_config_for(self, platform):
         """Đọc auto_seat[platform] từ self._cfg, render lên UI."""
@@ -1338,12 +1407,27 @@ class App(ctk.CTk):
                 self._add_ctiket_zone_row()
         elif mode == "seat_zone":
             self._build_dynamic_zone()
-            zones = as_.get("zone_priority") or as_.get("priority_targets") or []
-            self.txt_priority.delete("1.0", "end")
-            self.txt_priority.insert("1.0", "\n".join(zones))
+            items = as_.get("items") or []
+            if not items:
+                # Migrate config cũ: zone_priority (list tên) + 1 quantity chung
+                zones = as_.get("zone_priority") or as_.get("priority_targets") or []
+                qty_old = int(as_.get("quantity", 1) or 1)
+                items = [{"zone": z, "quantity": qty_old} for z in zones]
+            for w in self.zone_rows_frame.winfo_children():
+                w.destroy()
+            self._zone_priority_rows = []
+            if items:
+                for item in items:
+                    self._add_zone_priority_row(item)
+            else:
+                self._add_zone_priority_row()
         else:
             self._build_dynamic_map()
             priorities = as_.get("seat_map_priorities") or []
+            if priorities and not isinstance(priorities[0], dict):
+                # Migrate config cũ: list string + 1 quantity chung
+                qty_old = int(as_.get("quantity", 1) or 1)
+                priorities = [{"raw": p, "quantity": qty_old} for p in priorities]
             for w in self.seat_rows_frame.winfo_children():
                 w.destroy()
             self._seat_map_rows = []
@@ -1377,15 +1461,18 @@ class App(ctk.CTk):
         if platform == "Ctiket":
             self.lbl_mode.grid_remove()
             self.sel_mode.grid_remove()
-            self.lbl_qty.grid_remove()
-            self.inp_qty.grid_remove()
         else:
             self.lbl_mode.grid()
             self.sel_mode.grid()
-            self.lbl_qty.grid()
-            self.inp_qty.grid()
 
         self._load_seat_config_for(platform)
+        self._update_qty_field_visibility()
+
+    def _update_qty_field_visibility(self):
+        """Ô 'Số lượng vé' chung giờ luôn ẩn — cả seat_zone lẫn seat_map (1Zone/
+        Ticketbox/Ctiket) đều đã có SL riêng trên từng dòng ưu tiên."""
+        self.lbl_qty.grid_remove()
+        self.inp_qty.grid_remove()
 
     def _on_mode_change(self, _=None):
         mode = _label_to_mode(self.sel_mode.get())
@@ -1393,6 +1480,7 @@ class App(ctk.CTk):
             self._build_dynamic_zone()
         else:
             self._build_dynamic_map()
+        self._update_qty_field_visibility()
 
     # ── Tab Thông Tin ─────────────────────────────────────────────────────────
 
@@ -1596,10 +1684,6 @@ class App(ctk.CTk):
         cfg["active_platform"] = platform
         pk = _PLATFORM_KEY_MAP.get(platform, "1zone")
         mode = "seat_zone" if platform == "Ctiket" else _label_to_mode(self.sel_mode.get())
-        try:
-            qty = int(self.inp_qty.get().strip())
-        except Exception:
-            qty = 1
 
         seat_cfg = cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
         seat_cfg["seat_mode"]        = mode
@@ -1613,18 +1697,26 @@ class App(ctk.CTk):
             seat_cfg["zone_priority"] = [i["zone"] for i in items]
             seat_cfg["quantity"] = sum(i["quantity"] for i in items)
         elif mode == "seat_zone":
-            seat_cfg["quantity"] = qty
-            zones = [z.strip() for z in self.txt_priority.get("1.0", "end").splitlines() if z.strip()]
-            seat_cfg["zone_priority"]    = zones
-            seat_cfg["priority_targets"] = zones
+            self._refresh_zone_priority_rows()
+            items = [r.get_value() for r in self._zone_priority_rows if r.get_value()]
+            seat_cfg["items"] = items
+            seat_cfg["zone_priority"]    = [i["zone"] for i in items]
+            seat_cfg["priority_targets"] = [i["zone"] for i in items]
+            seat_cfg["quantity"]         = sum(i["quantity"] for i in items) if items else 1
             seat_cfg["seat_map_priorities"] = []
         else:
-            seat_cfg["quantity"] = qty
             self._refresh_seat_rows()
             priorities = [r.get_value() for r in self._seat_map_rows if r.get_value()]
             seat_cfg["seat_map_priorities"] = priorities
             seat_cfg["zone_priority"]        = priorities
             seat_cfg["priority_targets"]     = priorities
+            seat_cfg["quantity"] = max([p["quantity"] for p in priorities], default=1)
+            orphan_n = sum(1 for r in self._seat_map_rows if r.has_orphan_seat())
+            if orphan_n:
+                self.add_log(
+                    f"⚠️ {orphan_n} dòng có 'Ghế số' nhưng thiếu 'Hàng' — "
+                    f"(các) dòng này bị BỎ QUA khi lưu. Điền 'Hàng' để dòng có hiệu lực.",
+                    "yellow")
 
         save_config(cfg)
         self._cfg = cfg

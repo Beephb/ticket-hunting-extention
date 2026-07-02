@@ -562,11 +562,22 @@ async function clickTbModalContinue() {
 
 async function runTicketboxSeatZone(cfg) {
   const aseat = cfg.auto_seat?.["ticketbox"] || cfg.auto_seat || {};
-  const priorityList = aseat.zone_priority || aseat.priority_targets || [];
-  const quantity = parseInt(aseat.quantity) || 1;
   const allowPartial = !!aseat.allow_partial;  // NEW
 
-  svpLog(`🎟️ Ticketbox seat_zone | ưu tiên=${JSON.stringify(priorityList)} | SL=${quantity}${allowPartial ? " (cho phép mua thiếu)" : ""}`, "blue");
+  // Đọc items mới [{zone, quantity}] — mỗi khu có SL riêng.
+  // Fallback config cũ: zone_priority (list tên) + 1 quantity chung cho tất cả.
+  let zoneItems = [];
+  if (aseat.items && aseat.items.length) {
+    zoneItems = aseat.items
+      .map(i => ({ zone: String(i.zone || "").trim(), quantity: Math.max(1, parseInt(i.quantity) || 1) }))
+      .filter(i => i.zone);
+  } else {
+    const zones = (aseat.zone_priority || aseat.priority_targets || []).map(p => String(p).trim()).filter(Boolean);
+    const qtyOld = Math.max(1, parseInt(aseat.quantity) || 1);
+    zoneItems = zones.map(z => ({ zone: z, quantity: qtyOld }));
+  }
+
+  svpLog(`🎟️ Ticketbox seat_zone | ưu tiên=${JSON.stringify(zoneItems)}${allowPartial ? " (cho phép mua thiếu)" : ""}`, "blue");
 
   const info = extractTicketboxInfo();
   svpLog(`🔎 eventId=${info.eventId} | showingId=${info.showingId} | date=${info.date}`, "blue");
@@ -592,8 +603,10 @@ async function runTicketboxSeatZone(cfg) {
 
   let lastErr = null;
 
-  for (const target of priorityList) {
-    svpLog(`🎯 Ưu tiên zone: ${target}`, "yellow");
+  for (const zoneItem of zoneItems) {
+    const target = zoneItem.zone;
+    const quantity = zoneItem.quantity;
+    svpLog(`🎯 Ưu tiên zone: ${target} | SL=${quantity}`, "yellow");
 
     // Lấy API metadata
     let apiZone = null;

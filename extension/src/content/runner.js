@@ -294,7 +294,9 @@ function hideIndicator() {
 function startHuntIndicator(cfg) {
   _indicatorStartTime = Date.now();
   _indicatorPollCount = 0;
-  const zone = (_getPlatformCfg(cfg, cfg?.active_platform || "1Zone")?.zone_priority || [])[0] || "—";
+  const zp = (_getPlatformCfg(cfg, cfg?.active_platform || "1Zone")?.zone_priority || [])[0];
+  // zp có thể là string (khu, seat_zone mode) hoặc object {raw, quantity} (seat_map mode)
+  const zone = (zp && typeof zp === "object") ? (zp.raw || "—") : (zp || "—");
   const qty = _getPlatformCfg(cfg, cfg?.active_platform || "1Zone")?.quantity || 1;
   if (_indicatorInterval) clearInterval(_indicatorInterval);
   _indicatorInterval = setInterval(() => {

@@ -240,11 +240,13 @@ function pickAdjacent(tickets, quantity, numOrder) {
 
 // ── Select tickets theo priority ──────────────────────────────────────────────
 
-function selectTickets(tickets, priorities, quantity, requireAdjacent = true, allowSplit = false, allowPartial = false) {
-  // Nếu allowPartial = true, chấp nhận pick ≥ 1 ghế (thay vì cần đủ quantity)
-  const minRequired = allowPartial ? 1 : quantity;
+function selectTickets(tickets, priorityItems, requireAdjacent = true, allowSplit = false, allowPartial = false) {
+  for (const item of priorityItems) {
+    const raw = item.raw;
+    const quantity = Math.max(1, parseInt(item.quantity) || 1);
+    // Nếu allowPartial = true, chấp nhận pick ≥ 1 ghế (thay vì cần đủ quantity)
+    const minRequired = allowPartial ? 1 : quantity;
 
-  for (const raw of priorities) {
     const parsed = parsePriority1Zone(raw);
     if (parsed.type === "empty") continue;
 
@@ -259,7 +261,7 @@ function selectTickets(tickets, priorities, quantity, requireAdjacent = true, al
         if (!found) break;
         selected.push(found);
       }
-      if (selected.length >= minRequired) return { selected: selected.slice(0, quantity), reason: `exact:${raw}` };
+      if (selected.length >= minRequired) return { selected: selected.slice(0, quantity), reason: `exact:${raw}`, quantity };
       continue;
     }
 
@@ -278,12 +280,12 @@ function selectTickets(tickets, priorities, quantity, requireAdjacent = true, al
         if (rowTickets.length < minRequired) continue;
         if (requireAdjacent && rowTickets.length >= quantity) {
           const adj = pickAdjacent(rowTickets, quantity, parsed.numSpec?.order);
-          if (adj.length >= quantity) return { selected: adj.slice(0,quantity), reason: `adj-range:${raw}` };
+          if (adj.length >= quantity) return { selected: adj.slice(0,quantity), reason: `adj-range:${raw}`, quantity };
           if (!allowSplit && !allowPartial) continue;
         }
         // Partial: lấy bao nhiêu có
         const take = Math.min(rowTickets.length, quantity);
-        return { selected: rowTickets.slice(0,take), reason: `range:${raw}${take < quantity ? `(partial ${take}/${quantity})` : ""}` };
+        return { selected: rowTickets.slice(0,take), reason: `range:${raw}${take < quantity ? `(partial ${take}/${quantity})` : ""}`, quantity };
       }
       continue;
     }
@@ -324,13 +326,13 @@ function selectTickets(tickets, priorities, quantity, requireAdjacent = true, al
     if (candidates.length < minRequired) continue;
     if (requireAdjacent && candidates.length >= quantity) {
       const adj = pickAdjacent(candidates, quantity, []);
-      if (adj.length >= quantity) return { selected: adj.slice(0,quantity), reason: `adj-text:${raw}` };
+      if (adj.length >= quantity) return { selected: adj.slice(0,quantity), reason: `adj-text:${raw}`, quantity };
       if (!allowSplit && !allowPartial) continue;
     }
     const take = Math.min(candidates.length, quantity);
-    return { selected: candidates.slice(0,take), reason: `text:${raw}${take < quantity ? `(partial ${take}/${quantity})` : ""}` };
+    return { selected: candidates.slice(0,take), reason: `text:${raw}${take < quantity ? `(partial ${take}/${quantity})` : ""}`, quantity };
   }
-  return { selected: [], reason: "no match" };
+  return { selected: [], reason: "no match", quantity: 0 };
 }
 
 // ── Label variants (như Python _label_variants_1zone) ─────────────────────────
@@ -437,13 +439,28 @@ async function click1ZonePaymentBtn() {
 
 async function run1ZoneSeatMap(cfg) {
   const aseat = cfg.auto_seat?.["1zone"] || cfg.auto_seat || {};
-  const priorities = aseat.zone_priority || aseat.priority_targets || [];
-  const quantity = parseInt(aseat.quantity) || 1;
+
+  // Đọc seat_map_priorities mới [{raw, quantity}] — mỗi dòng ưu tiên có SL riêng.
+  // Fallback config cũ: zone_priority (list string) + 1 quantity chung cho tất cả.
+  let priorityItems = [];
+  const rawPriorities = aseat.seat_map_priorities || aseat.zone_priority || aseat.priority_targets || [];
+  const qtyOld = Math.max(1, parseInt(aseat.quantity) || 1);
+  priorityItems = rawPriorities
+    .map(p => (p && typeof p === "object")
+      ? { raw: String(p.raw || ""), quantity: Math.max(1, parseInt(p.quantity) || qtyOld) }
+      : { raw: String(p || ""), quantity: qtyOld })
+    .filter(p => p.raw);
+
   const requireAdjacent = aseat.require_adjacent !== false;
   const allowSplit = !!aseat.allow_split_seats;
   const allowPartial = !!aseat.allow_partial;
 
-  svpLog(`🗺️ 1Zone seat_map | priority=${priorities.join(",")} | SL=${quantity}${allowPartial ? " (cho phép mua thiếu)" : ""}`, "blue");
+  svpLog(`🗺️ 1Zone seat_map | priority=${JSON.stringify(priorityItems)}${allowPartial ? " (cho phép mua thiếu)" : ""}`, "blue");
+
+  if (!priorityItems.length) {
+    svpLog("❌ Chưa nhập ưu tiên ghế/vé cho 1Zone seat_map", "red");
+    return false;
+  }
 
   const info = extract1ZoneInfo();
   if (!info.eventId || !info.calendarId) {
@@ -485,15 +502,19 @@ async function run1ZoneSeatMap(cfg) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat selection loop", "yellow"); return false; }
-    const { selected, reason } = selectTickets(remaining, priorities, quantity, requireAdjacent, allowSplit, allowPartial);
+    const { selected, reason, quantity: matchedQty } = selectTickets(remaining, priorityItems, requireAdjacent, allowSplit, allowPartial);
 
-    const minRequired = allowPartial ? 1 : quantity;
+    if (!selected.length) {
+      svpLog("❌ Không tìm đủ ghế theo ưu tiên. Không chọn bừa ngoài danh sách.", "red");
+      return false;
+    }
+    const minRequired = allowPartial ? 1 : matchedQty;
     if (selected.length < minRequired) {
       svpLog("❌ Không tìm đủ ghế theo ưu tiên. Không chọn bừa ngoài danh sách.", "red");
       return false;
     }
-    if (allowPartial && selected.length < quantity) {
-      svpLog(`ℹ️ Chỉ tìm được ${selected.length}/${quantity} ghế — proceed do allow_partial=true`, "yellow");
+    if (allowPartial && selected.length < matchedQty) {
+      svpLog(`ℹ️ Chỉ tìm được ${selected.length}/${matchedQty} ghế — proceed do allow_partial=true`, "yellow");
     }
 
     const labels = selected.map(t => `${t.zoneName} ${t.label}`);
@@ -516,8 +537,8 @@ async function run1ZoneSeatMap(cfg) {
     }
 
     if (seatsRes?.ok) {
-      const partialNote = seatsRes.selectedCount < quantity ? ` (mua thiếu ${seatsRes.selectedCount}/${quantity})` : "";
-      svpLog(`✅ Seats.io đã chọn ${seatsRes.selectedCount}/${quantity} ghế${partialNote}`, "green");
+      const partialNote = seatsRes.selectedCount < matchedQty ? ` (mua thiếu ${seatsRes.selectedCount}/${matchedQty})` : "";
+      svpLog(`✅ Seats.io đã chọn ${seatsRes.selectedCount}/${matchedQty} ghế${partialNote}`, "green");
       await sleep(800);
 
       // Stage 3: setup hook capture orderId TRƯỚC khi click Thanh toán
