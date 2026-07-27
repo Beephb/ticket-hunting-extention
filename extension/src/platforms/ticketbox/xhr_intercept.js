@@ -112,19 +112,28 @@
       key: parsed?.data?.key || null,
       image: slide?.image || null,
       thumb: slide?.thumb || null,
+      // tile_x/tile_y: vị trí gap THẬT do server tự cung cấp sẵn — đáng tin cậy
+      // 100% (không phải suy đoán), tránh phải dùng OpenCV "đoán" qua /solve.
+      // Xác nhận bằng 2 mẫu HAR thật: OpenCV đoán lệch 130-137px so với tile_x.
+      tileX: typeof slide?.tile_x === "number" ? slide.tile_x : null,
+      tileY: typeof slide?.tile_y === "number" ? slide.tile_y : null,
+      tileWidth: typeof slide?.tile_width === "number" ? slide.tile_width : null,
+      tileHeight: typeof slide?.tile_height === "number" ? slide.tile_height : null,
       ts: Date.now(),
     };
     if (window.svpLog) {
-      window.svpLog(`🧩 TB captcha gen status=${status} showingId=${showingId} hasSlide=${!!slide}`,
+      window.svpLog(`🧩 TB captcha gen status=${status} showingId=${showingId} hasSlide=${!!slide} tileX=${_state.lastCaptchaGen.tileX}`,
         status === 200 ? "blue" : "yellow");
     }
   }
 
   function _handleCaptchaCheck(url, status, body, parsed) {
+    const m = url.match(RE_CAPTCHA_CHECK);
+    const showingId = m ? m[1] : null;
     const captchaToken = parsed?.data?.token || parsed?.data || null;
     const tokenStr = typeof captchaToken === "string" ? captchaToken : null;
     _state.lastCaptchaCheck = {
-      url, status, body, parsed,
+      url, status, body, parsed, showingId,
       captchaToken: tokenStr,
       ts: Date.now(),
     };
@@ -282,6 +291,7 @@
 
     getLastBookingCode()    { return _state.lastSubmitTicketInfo?.bookingCode || null; },
     getLastCaptchaToken()   { return _state.lastCaptchaCheck?.captchaToken || null; },
+    getLastCaptchaCheck()   { return _state.lastCaptchaCheck; },
     getLastCaptchaGen()     { return _state.lastCaptchaGen; },
     getLastRefreshToken()   { return _state.lastRefreshToken; },
     getLastLogin()          { return _state.lastLogin; },

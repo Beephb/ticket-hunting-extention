@@ -120,13 +120,30 @@
     // Rate limit check — reserve endpoint cũng có thể 429
     const rl = window.SVP_RATE_LIMIT?.forHost("api-v2.ticketbox.vn");
     if (res.status === 429 || res.status === 503) {
+      // BUG cũ: tính `wait` xong không hề await sleep(wait) — giá trị bị bỏ phí.
+      // Caller (vòng lặp retry "sold_out" ở seat_zone.js/seat_map.js) chỉ dựa
+      // vào raw.data.result.invalidItems để biết "còn đáng retry hay không" —
+      // vì rate_limited trả raw=null nên bị hiểu nhầm thành "lỗi khác, dừng
+      // hẳn", bỏ cuộc reserve ngay lúc server chỉ đang tạm chặn (thường xảy ra
+      // đúng lúc traffic cao nhất — mở bán). Giờ: thực sự đợi theo backoff, và
+      // đánh dấu rateLimited=true (trừ khi rate_limit.js đã quyết abort hẳn vì
+      // vượt ngưỡng liên tục) để caller coi đây là case "còn cơ hội, cứ retry"
+      // giống hệt case sold_out thay vì "lỗi cuối cùng".
+      let rateLimited = true;
       if (rl) {
         const wait = rl.onError429(res.status);
         if (window.svpLog) {
           window.svpLog(`⏸ TB reserve rate-limited (${res.status}) — wait ${wait}ms trước retry`, "yellow");
         }
+        if (wait < 0) {
+          rateLimited = false; // rate_limit.js đã abort (5 lần liên tục) — coi là lỗi thật, không retry nữa
+        } else {
+          await sleep(wait);
+        }
       }
-      return _failed("rate_limited", `HTTP ${res.status} — server limit, fallback Konva`);
+      const failResult = _failed("rate_limited", `HTTP ${res.status} — server limit${rateLimited ? ", sẽ retry" : ", abort (rate limit critical)"}`);
+      failResult.rateLimited = rateLimited;
+      return failResult;
     }
     rl?.onSuccess();
 

@@ -170,13 +170,16 @@ async function konvaClickZone(idField, idValue, zoneName, dialogChecker, maxPoin
   const offsets = [[0, 0], [5, 0], [-5, 0], [0, 5], [0, -5]];
 
   for (const pt of points.slice(0, maxPoints)) {
+    if (svpShouldStop?.()) { svpLog("🛑 Dừng click zone (stop signal)", "yellow"); return false; }
     const bx = pt.x, by = pt.y;
     const hit = elemAt(bx, by);
     svpLog(`🎯 Thử click: mode=${pt.mode} point=(${bx.toFixed(1)},${by.toFixed(1)}) hit=${hit}`, "blue");
 
     for (const [dx, dy] of offsets) {
+      if (svpShouldStop?.()) { svpLog("🛑 Dừng click zone (stop signal)", "yellow"); return false; }
       await realClick(bx + dx, by + dy);
       for (let i = 0; i < 8; i++) {
+        if (svpShouldStop?.()) { svpLog("🛑 Dừng click zone (stop signal)", "yellow"); return false; }
         await sleep(100);
         if (dialogChecker()) {
           svpLog(`✅ Popup mở: ${zoneName} | point=(${(bx+dx).toFixed(1)},${(by+dy).toFixed(1)})`, "green");

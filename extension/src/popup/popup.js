@@ -322,18 +322,29 @@ async function initSlotSelector(currentTab) {
   });
   sel.value = activeSlot;
 
+  // Lấy config đã merge slot từ background (không fetch /config global) và render lại.
+  function refreshConfigForActiveSlot() {
+    chrome.runtime.sendMessage({ type: "GET_CONFIG", tabId: currentTab.id }, res => {
+      if (res?.config) renderConfig(res.config, currentTab._detectedPlatform);
+    });
+  }
+
+  // FIX bug: trước đây chỉ refresh khi user tự đổi dropdown (event "change").
+  // Lúc mở popup, sel.value = activeSlot set bằng code KHÔNG tự bắn "change",
+  // nên popup luôn hiện config CHUNG (đã render ở init() bằng /config global)
+  // dù dropdown đã đúng slot — phải tự tay chọn lại slot mới thấy đúng nội
+  // dung. Giờ gọi refresh ngay tại đây, không đợi event.
+  if (activeSlot !== -1) {
+    refreshConfigForActiveSlot();
+  }
+
   sel.addEventListener("change", () => {
     const slotIndex = parseInt(sel.value);
     chrome.runtime.sendMessage({
       type: "SET_TAB_SLOT",
       tabId: currentTab.id,
       slotIndex,
-    }, () => {
-      // Lấy config đã merge slot từ background (không fetch /config global)
-      chrome.runtime.sendMessage({ type: "GET_CONFIG", tabId: currentTab.id }, res => {
-        if (res?.config) renderConfig(res.config, currentTab._detectedPlatform);
-      });
-    });
+    }, refreshConfigForActiveSlot);
   });
 }
 
@@ -370,11 +381,12 @@ async function init() {
   // Helper gửi message tới tab hiện tại
   async function sendToTab(type, label) {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab) {
-      chrome.tabs.sendMessage(tab.id, { type }).catch(() => {
-        addLog(`❌ Tab chưa load content script`);
-      });
+    if (!tab) return;
+    try {
+      await chrome.tabs.sendMessage(tab.id, { type });
       addLog(`✅ ${label}`);
+    } catch {
+      addLog(`❌ Tab chưa load content script`);
     }
   }
 

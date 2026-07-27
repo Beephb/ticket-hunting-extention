@@ -23,15 +23,15 @@ async function solveRotationType(base64Images, sliderButton) {
             attempt++;
             console.log(`[Rotation API] Đang gửi dữ liệu lên Server (Lần thử ${attempt}/${maxRetries})...`);
 
-            const response = await fetch('http://127.0.0.1:9279/solve', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-
-            const data = await response.json();
+            // Gọi /solve QUA background service worker thay vì fetch() thẳng
+            // từ content script — xem ghi chú chi tiết trong puzzle-solver.js
+            // (Chrome Local Network Access từ Chrome 141/142 chặn fetch từ
+            // content script tới 127.0.0.1, host_permissions không miễn trừ
+            // được cho content script).
+            const msgResult = await chrome.runtime.sendMessage({ type: "SOLVE_CAPTCHA", payload });
+            if (!msgResult) throw new Error("Không nhận được phản hồi từ background service worker.");
+            if (!msgResult.ok) throw new Error(msgResult.error || "Lỗi không rõ khi gọi /solve qua background");
+            const data = msgResult.data;
             let finalDragDistance = 0;
 
             if (data.distance_px) {

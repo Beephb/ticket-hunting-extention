@@ -258,9 +258,9 @@ function chooseBestSalable(candidates) {
     else if (info.salable) salable.push(c);
     else unknown.push(c);
   }
-  if (salable.length) return { chosen: salable[0], salable, soldOut };
-  if (unknown.length) return { chosen: unknown[0], salable, soldOut };
-  return { chosen: null, salable, soldOut };
+  if (salable.length) return { chosen: salable[0], salable, soldOut, unknown };
+  if (unknown.length) return { chosen: unknown[0], salable, soldOut, unknown };
+  return { chosen: null, salable, soldOut, unknown };
 }
 
 // ── Modal detector ────────────────────────────────────────────────────────────
@@ -602,20 +602,43 @@ async function runTicketboxSeatZone(cfg) {
   svpLog(`🔎 Date candidates: ${dates.join(", ")}`, "blue");
 
   let lastErr = null;
+  let cycle = 0;
 
-  for (const zoneItem of zoneItems) {
-    const target = zoneItem.zone;
-    const quantity = zoneItem.quantity;
-    svpLog(`🎯 Ưu tiên zone: ${target} | SL=${quantity}`, "yellow");
+  // FIX: trước đây khi 1 zone bị lock/sold-out tạm thời, code retry vô hạn
+  // (while true) trên đúng zone đó, không bao giờ nhảy sang zone ưu tiên kế
+  // tiếp. Giờ: mỗi zone chỉ thử 1 lần, fail (kể cả do bị giữ/lock) → nhảy
+  // ngay sang zone tiếp theo. Hết vòng qua hết zoneItems mà không zone nào
+  // thành công → quay lại từ zone đầu tiên, lặp lại toàn bộ chu kỳ, cho tới
+  // khi thành công hoặc nhận stop signal.
+  //
+  // FIX 2: zoneCache trước đây cache vĩnh viễn theo target (chỉ fetch showings/
+  // seatmap 1 lần/zone cho cả phiên) — hệ quả: sub-zone nào bị soldOut lúc fetch
+  // đầu (vd XOAY A) sẽ bị loại khỏi subZones VĨNH VIỄN, dù sau đó A có ai trả/nhả
+  // vé cũng không bắt lại được, vì code không bao giờ gọi lại collectApiZones cho
+  // target đó nữa. Giờ: refetch showings/seatmap mỗi chu kỳ, cập nhật đúng
+  // sub-zone nào đang thực sự salable tại thời điểm đó (kể cả zone vừa nhả
+  // vé ra lại). Đánh đổi: tốn thêm request đọc mỗi chu kỳ, đổi lấy bắt được zone
+  // vừa mở lại — nhất quán với seat_map.js.
+  //
+  // FIX 3: showings/seatmap trước đây bị fetch LẶP LẠI cho từng target riêng
+  // (2 zone ưu tiên = 2 lần GET showings + 2 lần GET seatmap dù data giống hệt
+  // nhau). Giờ: fetch CHỈ 1 LẦN/chu kỳ, dùng chung showJson/seatmapJson cho mọi
+  // target trong chu kỳ đó — collectApiZones chỉ là xử lý local trên data đã có,
+  // không tốn network. Đánh đổi nhỏ: mọi target trong cùng chu kỳ dùng chung 1
+  // "date" đã fetch thành công đầu tiên, thay vì mỗi target tự dò date riêng
+  // (chấp nhận được vì hầu hết event chỉ có 1 showing/date đang mở bán).
+  while (true) {
+    cycle++;
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat_zone", "yellow"); return false; }
 
-    // Lấy API metadata
-    let apiZone = null;
+    // ── Fetch showings/seatmap 1 lần/chu kỳ, dùng chung cho mọi target ──────
+    let showJson = null, seatmapJson = null, matchedDate = null;
     for (const date of dates) {
       try {
         const showUrl = `${API_TB_ZONE}/event/api/v1/events/showings/${info.showingId}?date=${date}`;
         const seatmapUrl = `${API_TB_ZONE}/event/api/v1/events/showings/${info.showingId}/seatmap`;
 
-        svpLog(`📡 GET showings/${info.showingId}?date=${date}`, "blue");
+        svpLog(`📡 GET showings/${info.showingId}?date=${date} | chu kỳ ${cycle}`, "blue");
         const showRes = await tbFetchJson(showUrl);
         if (!showRes.ok) { lastErr = `showings HTTP=${showRes.status}`; continue; }
 
@@ -623,145 +646,141 @@ async function runTicketboxSeatZone(cfg) {
         const seatmapRes = await tbFetchJson(seatmapUrl);
         if (!seatmapRes.ok) { lastErr = `seatmap HTTP=${seatmapRes.status}`; continue; }
 
-        const candidates = collectApiZones(showRes.data || {}, seatmapRes.data || {}, target);
-        if (!candidates.length) continue;
-
-        const { chosen, soldOut } = chooseBestSalable(candidates);
-
-        if (chosen) {
-          apiZone = chosen;
-          apiZone._matchedDate = date;
-          svpLog(`✅ API match: ${apiZone.name} | sectionId=${apiZone.sectionId} | ticketTypeId=${apiZone.ticketTypeId}`, "green");
-          if (soldOut.length) svpLog(`⏭️ Bỏ qua zone hết vé: ${soldOut.map(x => x.name).join(", ")}`, "yellow");
-          break;
-        }
-
-        lastErr = `target ${target} hết vé theo API`;
-        svpLog(`⏭️ ${lastErr}`, "yellow");
-        apiZone = null;
+        showJson = showRes.data || {};
+        seatmapJson = seatmapRes.data || {};
+        matchedDate = date;
         break;
-      } catch(e) {
+      } catch (e) {
         lastErr = e.message;
         svpLog(`⚠️ API metadata lỗi date=${date}: ${e.message}`, "yellow");
       }
     }
 
+    if (!showJson || !seatmapJson) {
+      svpLog(`⚠️ Chu kỳ ${cycle}: không fetch được showings/seatmap (lastErr=${lastErr}) — thử lại`, "yellow");
+      await new Promise(r => setTimeout(r, 500));
+      continue;
+    }
+
+    for (const zoneItem of zoneItems) {
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat_zone", "yellow"); return false; }
+    const target = zoneItem.zone;
+    const quantity = zoneItem.quantity;
+    svpLog(`🎯 Ưu tiên zone: ${target} | SL=${quantity}`, "yellow");
+
+    // Match zone trên data đã fetch chung của chu kỳ này — không GET lại.
+    // subZones: TẤT CẢ sub-zone khớp target (vd "xoay" → XOAY A, XOAY B, XOAY C),
+    // sẽ thử reserve lần lượt từng cái trước khi bỏ cuộc target này.
+    let subZones = null;
+    const candidates = collectApiZones(showJson, seatmapJson, target);
+    if (candidates.length) {
+      const { salable, soldOut, unknown } = chooseBestSalable(candidates);
+      const tryList = salable.length ? salable : unknown;
+
+      if (tryList.length) {
+        subZones = tryList.map(z => ({ ...z, _matchedDate: matchedDate }));
+        svpLog(`✅ API match "${target}" → ${subZones.length} sub-zone: ${subZones.map(z => z.name).join(", ")}`, "green");
+        if (soldOut.length) svpLog(`⏭️ Bỏ qua sub-zone hết vé: ${soldOut.map(x => x.name).join(", ")}`, "yellow");
+      } else {
+        lastErr = `target ${target} hết vé theo API`;
+        svpLog(`⏭️ ${lastErr}`, "yellow");
+      }
+    }
+
     // Skip nếu API xác định hết vé
-    if (apiZone === null && lastErr?.includes("hết vé theo API")) {
+    if ((!subZones || !subZones.length) && lastErr?.includes("hết vé theo API")) {
       svpLog(`⏭️ Skip target hết vé: ${target}`, "yellow");
       continue;
     }
 
     // ── STAGE 4 API-FIRST PATH ─────────────────────────────────────────────────
-    // Có đủ ticketTypeId + sectionId → thử reserve qua API trước Konva.
-    // Nếu fail (no captcha token, expired token, server reject) → fallback Konva.
-    if (apiZone && apiZone.ticketTypeId && apiZone.sectionId && window.__SVP_TB_RESERVE__) {
-      // Clamp quantity theo maxQtyPerOrder của ticketType
-      const maxQty = apiZone.maxQtyPerOrder ?? 99;
-      let apiQty = Math.min(quantity, maxQty);
-      if (apiQty < quantity) {
-        svpLog(`⚠️ maxQtyPerOrder=${maxQty} — clamp ${quantity}→${apiQty} vé`, "yellow");
-      }
+    // Thử lần lượt từng sub-zone khớp target (vd XOAY A → XOAY B → XOAY C).
+    // Chỉ khi TẤT CẢ sub-zone của target này đều fail mới nhảy sang ưu tiên kế.
+    if (subZones && subZones.length && window.__SVP_TB_RESERVE__) {
+      let matchedAnySubZone = false;
 
-      // Thử reserve, nếu fail do over-qty và allow_partial → giảm dần xuống 1
-      let apiResult = null;
-      while (apiQty >= 1) {
-        apiResult = await _tryApiReserveZone(info, apiZone, apiQty);
-        if (apiResult.success) break;
+      for (const apiZone of subZones) {
+        if (!apiZone.ticketTypeId || !apiZone.sectionId) continue;
+        matchedAnySubZone = true;
+        if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat_zone", "yellow"); return false; }
 
-        const errCode = apiResult.error?.errorCode;
-        const errMsg  = apiResult.error?.message || "";
-        const isQtyError = errCode === -1243
-          || errMsg.includes("tối đa")
-          || errMsg.includes("maximum")
-          || errMsg.includes("chỉ chọn");
-
-        if (isQtyError && allowPartial && apiQty > 1) {
-          svpLog(`⚠️ Server reject qty=${apiQty} (${errMsg}) — thử lại với ${apiQty - 1} vé`, "yellow");
-          apiQty--;
-          continue;
+        // Clamp quantity theo maxQtyPerOrder của ticketType
+        const maxQty = apiZone.maxQtyPerOrder ?? 99;
+        let apiQty = Math.min(quantity, maxQty);
+        if (apiQty < quantity) {
+          svpLog(`⚠️ maxQtyPerOrder=${maxQty} — clamp ${quantity}→${apiQty} vé`, "yellow");
         }
-        break; // lỗi khác hoặc không cho phép partial → thoát
-      }
 
-      if (apiResult?.success) {
-        svpLog(`🎫 API-first reserve OK — bookingCode=${apiResult.bookingCode} x${apiQty}`, "green");
-        if (window.svpEvent) {
-          window.svpEvent("reserve.success", {
-            platform: "ticketbox",
-            mode: "zone",
-            bookingCode: apiResult.bookingCode,
-            expireIn: apiResult.expireIn,
-            showingId: String(info.showingId),
-            eventId: String(info.eventId),
-            zoneName: apiZone.name,
-            quantity: apiQty,
-            method: "api-first",
-            durationMs: apiResult.durationMs,
-            checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${info.showingId}/question-form?date=${apiZone._matchedDate}`,
-          });
+        // Thử reserve, nếu fail do over-qty và allow_partial → giảm dần xuống 1
+        let apiResult = null;
+        while (apiQty >= 1) {
+          apiResult = await _tryApiReserveZone(info, apiZone, apiQty);
+          if (apiResult.success) break;
+
+          const errCode = apiResult.error?.errorCode;
+          const errMsg  = apiResult.error?.message || "";
+          const isQtyError = errCode === -1243
+            || errMsg.includes("tối đa")
+            || errMsg.includes("maximum")
+            || errMsg.includes("chỉ chọn");
+
+          if (isQtyError && allowPartial && apiQty > 1) {
+            svpLog(`⚠️ Server reject qty=${apiQty} (${errMsg}) — thử lại với ${apiQty - 1} vé`, "yellow");
+            apiQty--;
+            continue;
+          }
+          break; // lỗi khác hoặc không cho phép partial → thoát
         }
-        await _navigateToCheckoutAfterApi(info, apiZone._matchedDate, apiResult.bookingCode);
-        return true;
-      }
 
-      // ── Xử lý khi API fail ────────────────────────────────────────────────
-      const isSoldOut = (apiResult?.raw?.data?.result?.invalidItems || [])
-        .some(i => i.code === "item_is_sold_out");
-
-      if (isSoldOut) {
-        svpLog(`⏳ Zone đang bị giữ (item_is_sold_out) — retry đến khi nhả...`, "yellow");
-        let retryN = 0;
-        while (true) {
-          if (window.__SVP_TB_HUNT_STOP?.()) {
-            svpLog(`🛑 Dừng retry sold_out theo yêu cầu`, "yellow");
-            return false;
+        if (apiResult?.success) {
+          svpLog(`🎫 API-first reserve OK — ${apiZone.name} — bookingCode=${apiResult.bookingCode} x${apiQty}`, "green");
+          if (window.svpEvent) {
+            window.svpEvent("reserve.success", {
+              platform: "ticketbox",
+              mode: "zone",
+              bookingCode: apiResult.bookingCode,
+              expireIn: apiResult.expireIn,
+              showingId: String(info.showingId),
+              eventId: String(info.eventId),
+              zoneName: apiZone.name,
+              quantity: apiQty,
+              method: "api-first",
+              durationMs: apiResult.durationMs,
+              checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${info.showingId}/question-form?date=${apiZone._matchedDate}`,
+            });
           }
-          await sleep(1500);
-          if (window.__SVP_TB_HUNT_STOP?.()) {
-            svpLog(`🛑 Dừng retry sold_out theo yêu cầu`, "yellow");
-            return false;
-          }
-          retryN++;
-          svpLog(`🔄 Retry submit zone lần ${retryN}...`, "blue");
-          const r = await _tryApiReserveZone(info, apiZone, apiQty);
-          if (r.success) {
-            svpLog(`🎫 Zone reserve OK sau ${retryN} lần retry — bookingCode=${r.bookingCode}`, "green");
-            if (window.svpEvent) {
-              window.svpEvent("reserve.success", {
-                platform: "ticketbox", mode: "zone",
-                bookingCode: r.bookingCode, expireIn: r.expireIn,
-                showingId: String(info.showingId), eventId: String(info.eventId),
-                zoneName: apiZone.name, quantity: apiQty,
-                method: "api-retry", durationMs: r.durationMs,
-                checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${info.showingId}/question-form?date=${apiZone._matchedDate}`,
-              });
-            }
-            await _navigateToCheckoutAfterApi(info, apiZone._matchedDate, r.bookingCode);
-            return true;
-          }
-          const stillSoldOut = (r.raw?.data?.result?.invalidItems || []).some(i => i.code === "item_is_sold_out");
-          if (!stillSoldOut) {
-            svpLog(`❌ Lỗi khác sau retry zone: ${r.error?.message} — dừng`, "red");
-            return false;
-          }
+          await _navigateToCheckoutAfterApi(info, apiZone._matchedDate, apiResult.bookingCode);
+          return true;
         }
+
+        // ── Xử lý khi API fail cho sub-zone này ────────────────────────────
+        // FIX: trước đây gặp sold_out/rate_limited sẽ retry vô hạn đúng zone
+        // này. Giờ chỉ tính là 1 lần thử — fail vì bất kỳ lý do gì (kể cả bị
+        // giữ/lock tạm thời hay rate-limited) đều nhảy ngay sang sub-zone kế
+        // tiếp trong cùng target (vd XOAY A fail → thử XOAY B).
+        const isSoldOut = (apiResult?.raw?.data?.result?.invalidItems || [])
+          .some(i => i.code === "item_is_sold_out") || apiResult?.rateLimited === true;
+
+        lastErr = isSoldOut
+          ? `sub-zone ${apiZone.name} đang bị giữ/lock hoặc rate-limited`
+          : `API fail: ${apiResult?.error?.errorCode || ""} ${apiResult?.error?.message || apiResult?.error?.reason || "unknown"}`.trim();
+        svpLog(`❌ ${lastErr} | thử sub-zone tiếp theo trong "${target}"`, "red");
       }
 
-      // Lỗi khác → log rõ lý do, thử target tiếp theo
-      lastErr = `API fail: ${apiResult?.error?.errorCode || ""} ${apiResult?.error?.message || apiResult?.error?.reason || "unknown"}`.trim();
-      svpLog(`❌ API-first fail — ${lastErr} | zone=${target} | thử ưu tiên tiếp theo`, "red");
-      continue;
+      if (matchedAnySubZone) {
+        svpLog(`⏭️ Hết tất cả sub-zone của "${target}" — thử ưu tiên tiếp theo`, "yellow");
+        continue;
+      }
     }
 
     // Không đủ data để gọi API (thiếu ticketTypeId hoặc sectionId)
-    lastErr = `không đủ data API cho zone: ${target} (ticketTypeId=${apiZone?.ticketTypeId} sectionId=${apiZone?.sectionId})`;
+    lastErr = `không đủ data API cho zone: ${target}`;
     svpLog(`❌ ${lastErr}`, "red");
     continue;
-  }
+    }
 
-  svpLog(`❌ Không chọn được seat_zone. Lỗi cuối: ${lastErr}`, "red");
-  return false;
+    svpLog(`🔁 Đã thử hết ${zoneItems.length} zone ưu tiên (chu kỳ ${cycle}) — chưa zone nào thành công, quay lại từ đầu...`, "yellow");
+  }
 }
 
 // ── Stage 4 API-first helpers ────────────────────────────────────────────────

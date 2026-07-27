@@ -4,18 +4,25 @@
 // KHÔNG POST add-to-cart trực tiếp — chờ frontend tự POST sau khi click Tiếp tục
 
 const API_BASE_1Z_ZONE = "https://prod.1zone.vn/ticketing/api";
-const ZONES_CACHE_KEY = "__svp_1z_zones_cache__";
+const ZONES_CACHE_KEY_PREFIX = "__svp_1z_zones_cache__";
+function _zonesCacheKey1Z(eventId, calendarId) {
+  return `${ZONES_CACHE_KEY_PREFIX}:${eventId || ""}:${calendarId || ""}`;
+}
 
 // ── Đọc zones cache từ queue_watcher (preload trong lúc chờ queue) ────────────
+// Key phải scope theo eventId+calendarId — trước đây dùng key cố định nên hunt
+// event A xong, trong vòng 10 phút chuyển sang event B sẽ đọc nhầm data cache
+// của A (sai zone/giá/tình trạng vé) cho toàn bộ logic chọn ghế của B.
 
-async function loadZonesCacheFrom1Z() {
+async function loadZonesCacheFrom1Z(eventId, calendarId) {
   try {
-    const result = await chrome.storage.session.get(ZONES_CACHE_KEY);
-    const obj = result?.[ZONES_CACHE_KEY];
+    const key = _zonesCacheKey1Z(eventId, calendarId);
+    const result = await chrome.storage.session.get(key);
+    const obj = result?.[key];
     if (!obj) return null;
     const age = Date.now() - obj.ts;
     if (age > 10 * 60 * 1000) {
-      await chrome.storage.session.remove(ZONES_CACHE_KEY);
+      await chrome.storage.session.remove(key);
       return null;
     }
     svpLog(`📦 Dùng zones cache từ prequeue (age=${Math.round(age/1000)}s)`, "green");
@@ -88,7 +95,7 @@ async function getZonesApi1Z(eventId, calendarId, useCache = true) {
   // Chỉ dùng cache prequeue ở lần gọi đầu (useCache=true) — khi retry liên tục
   // (chờ ghế nhả ra) PHẢI fetch mới mỗi lần, không thì mãi đọc snapshot cũ.
   if (useCache) {
-    const cached = await loadZonesCacheFrom1Z();
+    const cached = await loadZonesCacheFrom1Z(eventId, calendarId);
     if (cached) return cached;
   }
 
@@ -471,6 +478,16 @@ async function clickPayAndWait1Z(calendarId) {
     if (svpShouldStop()) { svpLog("🛑 Stop signal — abort clickPay wait", "yellow"); return false; }
     await sleep(150);
 
+    // Race condition: ghế/khu bị người khác giành mất trong lúc chờ →
+    // dialog "Không còn đủ vé" hiện lên (có thể chồng nhiều cái).
+    // Dùng lại dismissAllSeatErrorDialogs1Z() (định nghĩa trong seat_map.js,
+    // cùng inject chung page nên global-scope dùng chung được).
+    if (typeof detectSeatErrorDialog1Z === "function" && detectSeatErrorDialog1Z()) {
+      const dismissState = await dismissAllSeatErrorDialogs1Z();
+      if (dismissState !== "clean") return false; // không đóng được / dialog lạ — dừng, tránh bấm bừa
+      return "__RETRY__"; // báo cho run1ZoneSeatZone: dọn xong, restart lại từ GET zones API
+    }
+
     // Priority 1: Hook capture orderId hoặc error (signal mạnh nhất)
     if (orderIdResult) {
       if (orderIdResult.success && orderIdResult.orderId) {
@@ -565,9 +582,23 @@ async function run1ZoneSeatZone(cfg) {
     return false;
   }
 
+  // Race condition: khu/ghế bị giành mất giữa chừng → dialog "Không còn đủ vé".
+  // Xử lý: dọn dialog rồi restart TOÀN BỘ flow từ đầu (GET zones mới),
+  // KHÔNG loại bỏ zone nào khỏi zoneItems.
+  const maxRestarts = Math.max(1, parseInt(aseat.max_conflict_restarts) || 8);
+
+  restart: for (let restartAttempt = 1; restartAttempt <= maxRestarts; restartAttempt++) {
+  if (svpShouldStop()) { svpLog("🛑 Stop signal", "yellow"); return false; }
+
+  // Dọn sạch dialog lỗi còn sót (từ vòng trước, hoặc bật ra ngoài lúc chờ orderId)
+  if (typeof dismissAllSeatErrorDialogs1Z === "function") {
+    const dismissState = await dismissAllSeatErrorDialogs1Z();
+    if (dismissState !== "clean") return false;
+  }
+
   // Lần thử đầu tiên của phiên hunt: ưu tiên cache prequeue (nhanh hơn).
-  // Các lần retry sau (chờ ghế nhả ra): LUÔN fetch mới, không dùng cache cũ.
-  const isFirstAttempt = (cfg._seatRetryAttempt ?? 1) <= 1;
+  // Các lần retry sau (chờ ghế nhả ra, hoặc do race-condition restart): LUÔN fetch mới.
+  const isFirstAttempt = restartAttempt === 1 && (cfg._seatRetryAttempt ?? 1) <= 1;
 
   // GET zones API
   svpLog(isFirstAttempt ? "📡 GET zones API..." : "📡 GET zones API (fresh, bỏ cache)...", "blue");
@@ -629,9 +660,19 @@ async function run1ZoneSeatZone(cfg) {
     }
 
     // Click Tiếp tục + chờ add-to-cart
-    return await clickPayAndWait1Z(info.calendarId);
+    const payResult = await clickPayAndWait1Z(info.calendarId);
+    if (payResult === "__RETRY__") {
+      svpLog(`🔁 Race condition — restart lại từ đầu (lần ${restartAttempt + 1})`, "yellow");
+      continue restart;
+    }
+    return payResult;
   }
 
   svpLog(`❌ Không chọn được 1Zone seat_zone. Lỗi cuối: ${lastErr}`, "red");
+  return false;
+
+  } // end restart loop
+
+  svpLog("❌ Vượt quá số lần retry do xung đột ghế (race condition) mà vẫn không thành công.", "red");
   return false;
 }

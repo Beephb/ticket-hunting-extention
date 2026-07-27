@@ -6,7 +6,15 @@
   if (window.__SVP_1Z_WATCHER_ISOLATED__) return;
   window.__SVP_1Z_WATCHER_ISOLATED__ = true;
 
-  const ZONES_CACHE_KEY = "__svp_1z_zones_cache__";
+  // BUG cũ: key cố định cho MỌI event — hunt event A xong, trong vòng 10 phút
+  // chuyển sang hunt event B khác sẽ bị "loadZonesCache() thấy có cache" (thực
+  // ra là cache của A) → skip fetch zones thật của B → dùng nhầm data event cũ
+  // (sai zone ID, giá, tình trạng còn/hết vé) cho toàn bộ logic chọn ghế của B.
+  // Giờ: key gồm eventId+calendarId, mỗi event có ô cache riêng.
+  const ZONES_CACHE_KEY_PREFIX = "__svp_1z_zones_cache__";
+  function _zonesCacheKey(eventId, calendarId) {
+    return `${ZONES_CACHE_KEY_PREFIX}:${eventId || ""}:${calendarId || ""}`;
+  }
   const ZONES_CACHE_TTL = 10 * 60 * 1000; // 10 phút
   const API_BASE = "https://prod.1zone.vn/ticketing/api";
 
@@ -76,10 +84,10 @@
 
   // ── Zones cache (chrome.storage.session — share cross-domain) ────────────────
 
-  async function saveZonesCache(data) {
+  async function saveZonesCache(eventId, calendarId, data) {
     try {
       await chrome.storage.session.set({
-        [ZONES_CACHE_KEY]: { ts: Date.now(), data }
+        [_zonesCacheKey(eventId, calendarId)]: { ts: Date.now(), data }
       });
       qLog("✅ Zones cached vào chrome.storage.session", "green");
     } catch (e) {
@@ -87,13 +95,14 @@
     }
   }
 
-  async function loadZonesCache() {
+  async function loadZonesCache(eventId, calendarId) {
     try {
-      const result = await chrome.storage.session.get(ZONES_CACHE_KEY);
-      const obj = result?.[ZONES_CACHE_KEY];
+      const key = _zonesCacheKey(eventId, calendarId);
+      const result = await chrome.storage.session.get(key);
+      const obj = result?.[key];
       if (!obj) return null;
       if (Date.now() - obj.ts > ZONES_CACHE_TTL) {
-        await chrome.storage.session.remove(ZONES_CACHE_KEY);
+        await chrome.storage.session.remove(key);
         return null;
       }
       return obj.data;
@@ -120,7 +129,7 @@
       qLog("⚠️ Thiếu eventId/calendarId — skip fetch zones", "yellow");
       return;
     }
-    if (loadZonesCache()) {
+    if (await loadZonesCache(eventId, calendarId)) {
       qLog("📦 Zones đã có cache — skip fetch", "blue");
       return;
     }
@@ -133,7 +142,7 @@
         signal: AbortSignal.timeout(6000),
       });
       if (!res.ok) { qLog(`⚠️ Zones API ${res.status}`, "yellow"); return; }
-      saveZonesCache(await res.json());
+      saveZonesCache(eventId, calendarId, await res.json());
     } catch (e) {
       qLog(`⚠️ Fetch zones lỗi: ${e.message}`, "yellow");
     }

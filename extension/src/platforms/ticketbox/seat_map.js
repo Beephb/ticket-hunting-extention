@@ -608,13 +608,29 @@ async function runTicketboxSeatMap(cfg) {
   svpLog(`🔎 Showing candidates: ${candidates.slice(0,4).map(c => `${c.id}@${c.date}[${c._source}]`).join(", ")}`, "blue");
 
   let lastErr = "";
+  let cycle = 0;
+
+  // FIX: cùng bug như seat_zone.js — trước đây khi 1 tổ hợp ghế bị lock/sold-out
+  // sẽ retry vô hạn đúng tổ hợp đó, không bao giờ thử ghế/khu khác. Giờ:
+  //   - Priority kiểu chỉ nhập tên khu (type=text): gom TẤT CẢ ghế trống khớp
+  //     khu đó thành 1 pool, ghế nào trống thì lụm (không cần liền kề — xem
+  //     riêng checkbox "ưu tiên mua liền kề" sau), fail tổ hợp nào thì loại
+  //     ghế đó ra khỏi pool và thử tổ hợp tiếp theo, tới khi hết pool.
+  //   - Priority kiểu chỉ định hàng/ghế cụ thể (exact/range): giữ nguyên cách
+  //     chọn 1 nhóm ghế theo spec, chỉ đổi retry: fail 1 lần → nhảy section
+  //     tiếp theo ngay, không lặp vô hạn.
+  //   - Hết toàn bộ showing candidates + priority items mà chưa thành công →
+  //     quay lại từ đầu, lặp tới khi thành công hoặc nhận stop signal.
+  while (true) {
+    cycle++;
+    if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat_map", "yellow"); return false; }
 
   for (let cidx = 0; cidx < candidates.length; cidx++) {
     if (svpShouldStop()) { svpLog("🛑 Stop signal — abort showing loop", "yellow"); return false; }
     const cand = candidates[cidx];
     const showingId = cand.id;
     const date = cand.date || new Date().toISOString().slice(0, 10);
-    svpLog(`🎬 Thử showing ${cidx+1}/${candidates.length}: ${showingId} | date=${date}`, "yellow");
+    svpLog(`🎬 Thử showing ${cidx+1}/${candidates.length}: ${showingId} | date=${date} | chu kỳ ${cycle}`, "yellow");
 
     // GET showings
     const showRes = await tbMapFetchJson(`${API_TB_MAP}/event/api/v1/events/showings/${showingId}?date=${date}`);
@@ -632,7 +648,10 @@ async function runTicketboxSeatMap(cfg) {
     if (!sections.length) { svpLog(`⚠️ Seatmap ${showingId} không có section hợp lệ`, "yellow"); continue; }
     svpLog(`🗺️ Seatmap OK | showing=${showingId} | sections=${sections.length}`, "green");
 
+    const reserve = window.__SVP_TB_RESERVE__;
+
     for (let pidx = 0; pidx < priorityItems.length; pidx++) {
+      if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat_map", "yellow"); return false; }
       const target = priorityItems[pidx].raw;
       const quantity = priorityItems[pidx].quantity;
       const parsed = parsePriorityTbMap(target);
@@ -656,65 +675,88 @@ async function runTicketboxSeatMap(cfg) {
         svpLog(`⚠️ Không thấy section khớp: ${target}`, "yellow");
         continue;
       }
+      if (!reserve) {
+        lastErr = "reserve API chưa load";
+        svpLog(`❌ ${lastErr}`, "red");
+        continue;
+      }
 
-      for (const sec of candidateSections) {
-        const secId = sec.id;
-        const secName = sec.name || "";
-        const tt = ticketTypes[sec.ticketTypeId] || {};
-        const ttName = tt.name || "";
+      // ── Nhánh "text" — chỉ nhập tên khu ──────────────────────────────────
+      if (parsed.type === "text") {
+        const pool = [];
+        for (const sec of candidateSections) {
+          const secId = sec.id;
+          const secName = sec.name || "";
+          const tt = ticketTypes[sec.ticketTypeId] || {};
+          const ticketTypeId = sec.ticketTypeId || tt.id;
+          if (!ticketTypeId || !secId) continue;
 
-        // GET section detail
-        const secRes = await tbMapFetchJson(`${API_TB_MAP}/event/api/v1/events/showings/${showingId}/sections/${secId}`);
-        if (!secRes.ok) { svpLog(`⚠️ GET section ${secName}/${secId} fail HTTP=${secRes.status}`, "yellow"); continue; }
-        const sectionDetail = { ...(getResult(secRes.data) || {}), ...sec };
+          const secRes = await tbMapFetchJson(`${API_TB_MAP}/event/api/v1/events/showings/${showingId}/sections/${secId}`);
+          if (!secRes.ok) { svpLog(`⚠️ GET section ${secName}/${secId} fail HTTP=${secRes.status}`, "yellow"); continue; }
+          const sectionDetail = { ...(getResult(secRes.data) || {}), ...sec };
 
-        const selected = tryPickFromSection(sectionDetail, parsed, quantity, requireAdjacent, allowSplit, seatNumberMode, allowPartial);
-        if (!selected.length) continue;
+          let seats = flattenAvailable(sectionDetail);
+          seats = applyNumberMode(seats, seatNumberMode);
+          if (parsed.parity) seats = seats.filter(s => _matchParityTb(s.seatNum, parsed.parity));
 
-        const labels = selected.map(s => s.label);
-        const partialNote = selected.length < quantity ? ` (mua thiếu ${selected.length}/${quantity})` : "";
-        svpLog(`✅ Chọn được ${selected.length} ghế${partialNote}: ${labels.join(", ")} | section=${secName} | ticket=${ttName}`, "green");
+          for (const s of seats) {
+            pool.push({ ...s, _secId: secId, _secName: secName, _ticketTypeId: ticketTypeId, _ttName: tt.name || "" });
+          }
+        }
 
-        // ── STAGE 4 API-FIRST PATH ─────────────────────────────────────────────
-        // Có đủ ticketTypeId + sectionId + seat IDs → thử reserve qua API
-        const ticketTypeId = sec.ticketTypeId || tt.id;
-        if (ticketTypeId && secId && window.__SVP_TB_RESERVE__) {
-          const reserve = window.__SVP_TB_RESERVE__;
-          // Khi partial (selected.length < quantity), dùng selected.length
-          // để payload nhất quán (API Ticketbox reject nếu quantity != số seat IDs)
-          const actualQty = selected.length;
-          const items = reserve.buildMapItems(
-            ticketTypeId,
-            actualQty,
-            secId,
-            selected.map(s => ({ id: s.id, quantity: 1 }))
-          );
+        if (!pool.length) {
+          svpLog(`⚠️ Khu "${target}" không còn ghế trống`, "yellow");
+          continue;
+        }
+        pool.sort((a, b) =>
+          String(a._secId).localeCompare(String(b._secId)) ||
+          a.rowName.localeCompare(b.rowName) ||
+          a.position - b.position
+        );
+
+        const excluded = new Set();
+        const minRequired = allowPartial ? 1 : quantity;
+        let matchedThisTarget = false;
+
+        while (true) {
+          if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat_map", "yellow"); return false; }
+          const avail = pool.filter(s => !excluded.has(s.id));
+          if (avail.length < minRequired) break; // hết pool — chưa thành công
+
+          const selected = avail.slice(0, quantity);
+          matchedThisTarget = true;
+
+          // Gom theo section để build items[] (1 entry / section)
+          const bySec = new Map();
+          for (const s of selected) {
+            if (!bySec.has(s._secId)) bySec.set(s._secId, { ticketTypeId: s._ticketTypeId, sectionId: s._secId, seats: [] });
+            bySec.get(s._secId).seats.push({ id: parseInt(s.id), quantity: 1 });
+          }
+          const items = [...bySec.values()].map(g => ({
+            id: typeof g.ticketTypeId === "string" ? parseInt(g.ticketTypeId) : g.ticketTypeId,
+            quantity: g.seats.length,
+            sectionId: typeof g.sectionId === "string" ? parseInt(g.sectionId) : g.sectionId,
+            seats: g.seats,
+          }));
+
+          const labels = selected.map(s => s.label);
+          svpLog(`🎲 Thử tổ hợp ${selected.length} ghế trong "${target}": ${labels.join(", ")}`, "blue");
+
           const apiResult = await reserve.submitTicketInfo({
-            eventId: info.eventId,
-            showingId,
-            date,
-            items,
-            timeoutMs: 2000,
+            eventId: info.eventId, showingId, date, items, timeoutMs: 2000,
           });
+
           if (apiResult.success) {
-            const partialNote = actualQty < quantity ? ` (mua thiếu ${actualQty}/${quantity})` : "";
+            const partialNote = selected.length < quantity ? ` (mua thiếu ${selected.length}/${quantity})` : "";
             svpLog(`🎫 API-first reserve OK${partialNote} — bookingCode=${apiResult.bookingCode}`, "green");
-            // Emit structured event cho desktop UI
             if (window.svpEvent) {
               window.svpEvent("reserve.success", {
-                platform: "ticketbox",
-                mode: "map",
-                bookingCode: apiResult.bookingCode,
-                expireIn: apiResult.expireIn,
-                showingId: String(showingId),
-                eventId: String(info.eventId),
-                sectionName: secName,
-                ticketName: ttName,
-                seats: selected.map(s => s.label),
-                quantity: actualQty,
-                quantityTarget: quantity,
-                method: "api-first",
-                durationMs: apiResult.durationMs,
+                platform: "ticketbox", mode: "map",
+                bookingCode: apiResult.bookingCode, expireIn: apiResult.expireIn,
+                showingId: String(showingId), eventId: String(info.eventId),
+                sectionName: target, ticketName: target,
+                seats: labels, quantity: selected.length, quantityTarget: quantity,
+                method: "api-first", durationMs: apiResult.durationMs,
                 checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`,
               });
             }
@@ -728,63 +770,81 @@ async function runTicketboxSeatMap(cfg) {
             return true;
           }
 
-          // ── Xử lý khi API fail ──────────────────────────────────────────────
+          // Fail — loại các ghế vừa thử ra khỏi pool, thử tổ hợp kế tiếp
+          for (const s of selected) excluded.add(s.id);
           const isSoldOut = (apiResult.raw?.data?.result?.invalidItems || [])
-            .some(i => i.code === "item_is_sold_out");
-
-          if (isSoldOut) {
-            svpLog(`⏳ Ghế đang bị giữ (item_is_sold_out) — retry đến khi nhả...`, "yellow");
-            let retryN = 0;
-            while (true) {
-              if (window.__SVP_TB_HUNT_STOP?.()) {
-                svpLog(`🛑 Dừng retry sold_out theo yêu cầu`, "yellow");
-                return false;
-              }
-              await sleep(1500);
-              if (window.__SVP_TB_HUNT_STOP?.()) {
-                svpLog(`🛑 Dừng retry sold_out theo yêu cầu`, "yellow");
-                return false;
-              }
-              retryN++;
-              svpLog(`🔄 Retry submit lần ${retryN}...`, "blue");
-              const r = await reserve.submitTicketInfo({ eventId: info.eventId, showingId, date, items, timeoutMs: 2000 });
-              if (r.success) {
-                svpLog(`🎫 Reserve OK sau ${retryN} lần retry — bookingCode=${r.bookingCode}`, "green");
-                if (window.svpEvent) {
-                  window.svpEvent("reserve.success", {
-                    platform: "ticketbox", mode: "map",
-                    bookingCode: r.bookingCode, expireIn: r.expireIn,
-                    showingId: String(showingId), eventId: String(info.eventId),
-                    sectionName: secName, ticketName: ttName,
-                    seats: selected.map(s => s.label),
-                    quantity: actualQty, quantityTarget: quantity,
-                    method: "api-retry", durationMs: r.durationMs,
-                    checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`,
-                  });
-                }
-                try { localStorage.setItem(`bookingCode_${showingId}`, JSON.stringify(r.bookingCode)); } catch {}
-                await new Promise(r2 => setTimeout(r2, 100));
-                location.href = `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`;
-                return true;
-              }
-              const stillSoldOut = (r.raw?.data?.result?.invalidItems || []).some(i => i.code === "item_is_sold_out");
-              if (!stillSoldOut) {
-                svpLog(`❌ Lỗi khác sau retry: ${r.error?.message} — dừng`, "red");
-                return false;
-              }
-            }
-          }
-
-          // Lỗi khác → log rõ lý do, thử section tiếp theo
-          lastErr = `API fail: ${apiResult.error?.errorCode || ""} ${apiResult.error?.message || apiResult.error?.reason || "unknown"}`.trim();
-          svpLog(`❌ API-first fail — ${lastErr} | section=${secName} | thử section tiếp theo`, "red");
-          continue;
+            .some(i => i.code === "item_is_sold_out") || apiResult.rateLimited === true;
+          lastErr = isSoldOut
+            ? `ghế bị giữ/lock trong "${target}": ${labels.join(", ")}`
+            : `API fail: ${apiResult.error?.errorCode || ""} ${apiResult.error?.message || apiResult.error?.reason || "unknown"}`.trim();
+          svpLog(`❌ ${lastErr} | thử tổ hợp ghế khác trong "${target}"`, "red");
         }
+
+        if (matchedThisTarget) {
+          svpLog(`⏭️ Hết ghế khả dụng trong "${target}" — thử ưu tiên tiếp theo`, "yellow");
+        }
+        continue;
+      }
+
+      // ── Nhánh "exact"/"range" — chỉ định hàng/ghế cụ thể ─────────────────
+      for (const sec of candidateSections) {
+        if (svpShouldStop()) { svpLog("🛑 Stop signal — abort seat_map", "yellow"); return false; }
+        const secId = sec.id;
+        const secName = sec.name || "";
+        const tt = ticketTypes[sec.ticketTypeId] || {};
+        const ttName = tt.name || "";
+        const ticketTypeId = sec.ticketTypeId || tt.id;
+
+        const secRes = await tbMapFetchJson(`${API_TB_MAP}/event/api/v1/events/showings/${showingId}/sections/${secId}`);
+        if (!secRes.ok) { svpLog(`⚠️ GET section ${secName}/${secId} fail HTTP=${secRes.status}`, "yellow"); continue; }
+        const sectionDetail = { ...(getResult(secRes.data) || {}), ...sec };
+
+        const selected = tryPickFromSection(sectionDetail, parsed, quantity, requireAdjacent, allowSplit, seatNumberMode, allowPartial);
+        if (!selected.length) continue;
+        if (!ticketTypeId || !secId) continue;
+
+        const labels = selected.map(s => s.label);
+        const partialNote = selected.length < quantity ? ` (mua thiếu ${selected.length}/${quantity})` : "";
+        svpLog(`✅ Chọn được ${selected.length} ghế${partialNote}: ${labels.join(", ")} | section=${secName} | ticket=${ttName}`, "green");
+
+        const actualQty = selected.length;
+        const items = reserve.buildMapItems(ticketTypeId, actualQty, secId, selected.map(s => ({ id: s.id, quantity: 1 })));
+        const apiResult = await reserve.submitTicketInfo({ eventId: info.eventId, showingId, date, items, timeoutMs: 2000 });
+
+        if (apiResult.success) {
+          const partialNote2 = actualQty < quantity ? ` (mua thiếu ${actualQty}/${quantity})` : "";
+          svpLog(`🎫 API-first reserve OK${partialNote2} — bookingCode=${apiResult.bookingCode}`, "green");
+          if (window.svpEvent) {
+            window.svpEvent("reserve.success", {
+              platform: "ticketbox", mode: "map",
+              bookingCode: apiResult.bookingCode, expireIn: apiResult.expireIn,
+              showingId: String(showingId), eventId: String(info.eventId),
+              sectionName: secName, ticketName: ttName,
+              seats: labels, quantity: actualQty, quantityTarget: quantity,
+              method: "api-first", durationMs: apiResult.durationMs,
+              checkoutUrl: `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`,
+            });
+          }
+          try {
+            localStorage.setItem(`bookingCode_${showingId}`, JSON.stringify(apiResult.bookingCode));
+          } catch (e) {
+            svpLog(`⚠️ Lưu bookingCode fail: ${e.message}`, "yellow");
+          }
+          await new Promise(r => setTimeout(r, 100));
+          location.href = `https://ticketbox.vn/events/${info.eventId}/bookings/${showingId}/question-form?date=${date}`;
+          return true;
+        }
+
+        const isSoldOut = (apiResult.raw?.data?.result?.invalidItems || [])
+          .some(i => i.code === "item_is_sold_out") || apiResult.rateLimited === true;
+        lastErr = isSoldOut
+          ? `ghế đang bị giữ/lock: ${labels.join(", ")}`
+          : `API fail: ${apiResult.error?.errorCode || ""} ${apiResult.error?.message || apiResult.error?.reason || "unknown"}`.trim();
+        svpLog(`❌ ${lastErr} | thử section tiếp theo`, "red");
       }
     }
   }
 
-  if (lastErr) svpLog(`❌ Không reserve được ghế. Lỗi cuối: ${lastErr}`, "red");
-  else svpLog("❌ Không tìm được ghế theo ưu tiên. Dừng, không chọn bừa.", "red");
-  return false;
+  svpLog(`🔁 Đã thử hết showing + ưu tiên (chu kỳ ${cycle}) — chưa thành công, quay lại từ đầu...`, "yellow");
+  }
 }

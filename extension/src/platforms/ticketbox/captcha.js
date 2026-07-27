@@ -68,6 +68,9 @@
         osc.start(ctx.currentTime + offset);
         osc.stop(ctx.currentTime + offset + 0.2);
       });
+      // Đóng context sau khi beep cuối phát xong (~0.7s) — tránh leak AudioContext
+      // sống vĩnh viễn nếu captcha xuất hiện nhiều lần trong 1 phiên hunt.
+      setTimeout(() => { ctx.close().catch(() => {}); }, 800);
     } catch {}
 
     // Indicator overlay
@@ -118,7 +121,22 @@
       }
     }
 
-    // Step 3: captcha đang hiện → alert user + pause
+    // Step 2.5: captcha vừa xuất hiện — cho hệ auto-solve (content.js) một khoảng
+    // đệm ngắn để tự giải trước khi báo động giả cho user. Trước đây alert bắn
+    // ngay lập tức tại thời điểm captcha vừa render, dù auto-solve thường giải
+    // xong trong 1-2s — gây beep/overlay không cần thiết gần như mỗi lần.
+    const AUTO_SOLVE_GRACE_MS = 1800;
+    {
+      const graceDeadline = Date.now() + AUTO_SOLVE_GRACE_MS;
+      while (Date.now() < graceDeadline) {
+        if (window.svpShouldStop?.()) return false;
+        if (_hasCachedToken(sid)) return true;      // auto-solve xong trong lúc chờ
+        if (!isCaptchaVisible()) return true;        // overlay tự đóng
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
+
+    // Step 3: vẫn còn captcha sau grace period → alert user + pause
     if (window.svpLog)
       window.svpLog(`🧩 CAPTCHA xuất hiện — bot dừng, chờ user giải (max ${Math.round(timeoutMs/1000)}s)`, "yellow");
     _alertUser();

@@ -128,6 +128,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     stopHuntTicketbox?.();
     stopHuntCtiket?.();
     _running = false;
+    // Xoá session flag — trước đây chỉ set stop-flag cho vòng lặp đang chạy,
+    // KHÔNG xoá __svp_hunt_done__/__svp_run_triggered__ (TTL 90 phút). Nếu
+    // sau khi bấm Dừng mà trang tự SPA-navigate/reload (vd Ticketbox tự
+    // chuyển từ queue sang trang chọn vé), checkAndClearHuntFlag() ở lần
+    // load mới vẫn thấy flag còn hạn → tự resume chọn ghế dù đã bấm dừng.
+    try {
+      sessionStorage.removeItem(_HUNT_FLAG_KEY);
+      sessionStorage.removeItem(_RUN_TRIGGERED_KEY);
+    } catch {}
     // Dừng indicator và clear interval
     hideIndicator();
     showIndicator("⚪ Đã dừng", "Hunt đã được tắt", "#64748b");
@@ -520,6 +529,35 @@ function watchNavigation() {
         if (huntActive) {
           svpLog("⏳ SPA nav → Ctiket queue — khởi động queue_watcher...", "blue");
           setTimeout(() => watchLoop?.(), 800);
+        }
+        return;
+      }
+
+      // Ticketbox navigate sang /queue/{showingId} — xảy ra khi waiting room countdown = 0
+      // Chạy khi: mày bấm tay vào waiting-room + bật tool, hoặc hunt flow redirect sang queue
+      if (/\/queue\/\d+/.test(location.pathname) && location.hostname.includes("ticketbox")) {
+        const huntActive = isRunTriggered() || !!sessionStorage.getItem(_HUNT_FLAG_KEY);
+        if (huntActive) {
+          svpLog("⏳ SPA nav → Ticketbox queue — bắt đầu poll queue...", "blue");
+          setTimeout(async () => {
+            const queueModule = window.__SVP_TB_QUEUE__;
+            if (!queueModule) { svpLog("⚠️ TB queue module chưa load", "yellow"); return; }
+            const showingId = location.href.match(/\/queue\/(\d+)/)?.[1];
+            if (!showingId) { svpLog("⚠️ Không lấy được showingId từ URL queue", "yellow"); return; }
+            const tokenMgr = window.__SVP_TB_TOKEN__;
+            const captchaToken = tokenMgr?.getCaptchaToken?.(showingId) || null;
+            svpLog(`⏳ Poll TB queue — showingId=${showingId}`, "yellow");
+            const result = await queueModule.waitForBookingTurn(showingId, captchaToken, { timeoutMs: 900000 });
+            if (result.ok) {
+              svpLog(`✅ TB queue BOOKING — chờ Ticketbox navigate sang select-ticket`, "green");
+              // Set hunt flag để khi Ticketbox tự navigate sang select-ticket
+              // watchNavigation() → maybeRun(true) → chọn ghế tự động
+              setHuntFlag();
+              setRunTriggered();
+            } else {
+              svpLog(`⚠️ TB queue kết thúc: ${result.reason}`, "yellow");
+            }
+          }, 1000);
         }
         return;
       }

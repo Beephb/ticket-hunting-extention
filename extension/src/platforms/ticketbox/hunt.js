@@ -71,6 +71,12 @@ function isTbHuntShowingOpen(showing) {
   } catch { return false; }
 }
 
+function isTbHuntShowingWaitingRoom(showing) {
+  try {
+    return String(showing?.status || "").toLowerCase() === "waiting_room";
+  } catch { return false; }
+}
+
 function findBestTbShowing(eventJson, preferredDate) {
   try {
     const result = eventJson?.data?.result || {};
@@ -200,44 +206,48 @@ async function waitTbQueueExit(showingId, captchaToken, timeoutMs = 900000) {
 
 // ── Direct showings + nav ─────────────────────────────────────────────────────
 
-async function directTbShowingsAndNav(eventId, showingId, date) {
+async function directTbShowingsAndNav(eventId, showingId, date, isWaitingRoom = false) {
   const showingsUrl = `${API_TB_HUNT}/event/api/v1/events/showings/${showingId}?date=${date}`;
   const seatmapUrl = `${API_TB_HUNT}/event/api/v1/events/showings/${showingId}/seatmap`;
-  const targetUrl = `${WEB_TB_HUNT}/events/${eventId}/bookings/${showingId}/select-ticket`;
+  const targetUrl = isWaitingRoom
+    ? `${WEB_TB_HUNT}/waiting-room/${showingId}`
+    : `${WEB_TB_HUNT}/events/${eventId}/bookings/${showingId}/select-ticket`;
 
   // Lấy captcha token (nếu có) để truyền vào queue watcher
   const tokenMgr = window.__SVP_TB_TOKEN__;
   const captchaToken = tokenMgr?.getCaptchaToken?.(showingId) || null;
 
-  svpLog(`🚀 GET trực tiếp showings/${showingId}?date=${date}`, "green");
-  try {
-    const res = await fetch(showingsUrl, {
-      credentials: "include",
-      headers: { "Accept": "application/json" },
-      signal: AbortSignal.timeout(6000),
-    });
-    svpLog(`📡 Showings API HTTP=${res.status}`, res.ok ? "blue" : "yellow");
-    if (!res.ok) {
-      svpLog(`⚠️ Showings fail HTTP=${res.status}`, "yellow");
+  if (!isWaitingRoom) {
+    svpLog(`🚀 GET trực tiếp showings/${showingId}?date=${date}`, "green");
+    try {
+      const res = await fetch(showingsUrl, {
+        credentials: "include",
+        headers: { "Accept": "application/json" },
+        signal: AbortSignal.timeout(6000),
+      });
+      svpLog(`📡 Showings API HTTP=${res.status}`, res.ok ? "blue" : "yellow");
+      if (!res.ok) {
+        svpLog(`⚠️ Showings fail HTTP=${res.status}`, "yellow");
+        return false;
+      }
+    } catch(e) {
+      svpLog(`⚠️ Showings fetch lỗi: ${e.message}`, "yellow");
       return false;
     }
-  } catch(e) {
-    svpLog(`⚠️ Showings fetch lỗi: ${e.message}`, "yellow");
-    return false;
+
+    // Seatmap — fail không chặn nav
+    svpLog(`🗺️ GET seatmap/${showingId}`, "blue");
+    try {
+      const res = await fetch(seatmapUrl, {
+        credentials: "include",
+        headers: { "Accept": "application/json" },
+        signal: AbortSignal.timeout(6000),
+      });
+      svpLog(`📡 Seatmap API HTTP=${res.status}`, res.ok ? "blue" : "yellow");
+    } catch {}
   }
 
-  // Seatmap — fail không chặn nav
-  svpLog(`🗺️ GET seatmap/${showingId}`, "blue");
-  try {
-    const res = await fetch(seatmapUrl, {
-      credentials: "include",
-      headers: { "Accept": "application/json" },
-      signal: AbortSignal.timeout(6000),
-    });
-    svpLog(`📡 Seatmap API HTTP=${res.status}`, res.ok ? "blue" : "yellow");
-  } catch {}
-
-  svpLog(`🚀 Direct nav select-ticket: ${targetUrl}`, "green");
+  svpLog(`🚀 Nav → ${targetUrl}`, "green");
   location.href = targetUrl;
   await sleep(3000);
 
@@ -330,7 +340,12 @@ async function pollTbEventApi(eventId, preferredDate) {
 
           if (isTbHuntShowingOpen(showing)) {
             svpLog(`🎯 Showing mở bán: ${showingId} (${statusName})`, "green");
-            return { showingId, showingDate: tbHuntShowingDate(showing), showing };
+            return { showingId, showingDate: tbHuntShowingDate(showing), showing, isWaitingRoom: false };
+          }
+
+          if (isTbHuntShowingWaitingRoom(showing)) {
+            svpLog(`🟡 Waiting room đang mở! Showing ${showingId} (${statusName})`, "yellow");
+            return { showingId, showingDate: tbHuntShowingDate(showing), showing, isWaitingRoom: true };
           }
 
           if (Date.now() - lastWaitLog > 3000) {
@@ -400,7 +415,7 @@ async function huntTicketbox(cfg) {
     return;
   }
 
-  const { showingId, showingDate, showing } = result;
+  const { showingId, showingDate, showing, isWaitingRoom } = result;
   if (!showingId) {
     svpLog("❌ Không có showing_id.", "red");
     return;
@@ -412,8 +427,12 @@ async function huntTicketbox(cfg) {
     svpLog(`📅 Override date theo showing: ${navDate}`, "blue");
   }
 
+  if (isWaitingRoom) {
+    svpLog("🟡 Showing có waiting room — nav sang /waiting-room/ trước", "yellow");
+  }
+
   _huntPollerStopTb = true;
-  await directTbShowingsAndNav(eventId, showingId, navDate);
+  await directTbShowingsAndNav(eventId, showingId, navDate, isWaitingRoom);
 }
 
 function stopHuntTicketbox() {

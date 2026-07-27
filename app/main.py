@@ -11,7 +11,9 @@ import http.client
 import webbrowser
 import base64
 import io
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import tempfile
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from tkinter import messagebox
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 import customtkinter as ctk
@@ -86,7 +88,9 @@ _scan_result  = None           # Kết quả trả về từ extension
 _scan_event   = threading.Event()  # Signal khi có kết quả
 
 # ── Hunt all state ────────────────────────────────────────────────────────────
-_hunt_all_pending = False      # Desktop yêu cầu broadcast HUNT_NOW tất cả tab
+# Dùng counter thay vì boolean "ăn 1 lần" để nhiều Chrome profile (nhiều extension
+# instance cùng poll 1 server) đều nhận được lệnh, không bị race condition mất lệnh.
+_hunt_all_version = 0          # Tăng mỗi lần bấm "Chạy tất cả tab"
 
 # ── Mode label mapping (UI tiếng Việt ↔ internal key) ────────────────────────
 MODE_LABEL_ZONE = "Chọn zone (khu)"
@@ -109,6 +113,12 @@ def _mode_to_label(mode):
 _command_queue = []  # list of {id, type, payload, createdAt}
 _command_lock = threading.Lock()
 _command_seq = 0
+
+# ── Config file lock ──────────────────────────────────────────────────────────
+# Bảo vệ chuỗi đọc-sửa-ghi config.json (load_config → sửa → save_config) khỏi
+# race condition khi ThreadingHTTPServer xử lý nhiều request POST /config,
+# /slots song song (VD nhiều Chrome profile cùng lưu config gần như đồng thời).
+_config_lock = threading.Lock()
 
 # ── Extension status tracking ─────────────────────────────────────────────────
 import time
@@ -240,8 +250,27 @@ def load_config():
     return cfg
 
 def save_config(cfg):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    # Ghi atomic: dump ra file tạm CÙNG THƯ MỤC rồi os.replace() swap vào chỗ cũ.
+    # os.replace() là atomic rename ở filesystem level (cả Windows lẫn POSIX) —
+    # loại bỏ hoàn toàn khoảng hở trước đây khi open(..., "w") xoá trắng
+    # CONFIG_FILE rồi mới ghi dần nội dung mới: nếu 1 thread khác (GET /config,
+    # GET /slots — extension poll mỗi 3s qua ThreadingHTTPServer) đọc đúng lúc
+    # đó sẽ dính JSON rỗng/dở dang → json.load() lỗi → load_config() âm thầm
+    # trả về DEFAULT_CONFIG, xoá sạch zone_priority/custom_fields/seat_slots
+    # đã lưu ngay giữa lúc đang hunt. Dùng tempfile cùng thư mục để đảm bảo
+    # os.replace() luôn same-filesystem (bắt buộc để atomic).
+    dir_name = os.path.dirname(CONFIG_FILE) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".config_", suffix=".tmp", dir=dir_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, CONFIG_FILE)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
 
 # ── Localhost API ─────────────────────────────────────────────────────────────
 
@@ -252,21 +281,31 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, code, data):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-SVP-Auth")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-SVP-Auth")
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
+            # Client (extension) đã đóng connection trước khi server kịp trả lời
+            # (thường do AbortSignal.timeout() hết hạn khi app đang bận xử lý
+            # burst request). Không phải lỗi thật — bỏ qua, không văng traceback
+            # ra console để tránh gây hiểu lầm app đang crash.
+            pass
 
     def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-SVP-Auth")
-        self.send_header("Access-Control-Max-Age", "600")
-        self.end_headers()
+        try:
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-SVP-Auth")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.end_headers()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
+            pass
 
     def _check_auth(self):
         """Return True if request authorized.
@@ -305,18 +344,21 @@ class _Handler(BaseHTTPRequestHandler):
             cfg = load_config()
             self._send_json(200, {"slots": cfg.get("seat_slots", [])})
         elif self.path == "/hunt-all":
-            global _hunt_all_pending
             _ext_last_ping_ts = time.time()
-            if _hunt_all_pending:
-                _hunt_all_pending = False
-                self._send_json(200, {"pending": True})
-            else:
-                self._send_json(200, {"pending": False})
+            # Trả version hiện tại — KHÔNG reset. Mỗi extension client tự so sánh
+            # với version đã thấy lần trước (lưu ở chrome.storage.local riêng của
+            # từng Chrome profile) để quyết định có broadcast hay không.
+            self._send_json(200, {"version": _hunt_all_version})
         elif self.path == "/ping":
             _ext_last_ping_ts = time.time()
             self._send_json(200, {"ok": True})
         elif self.path == "/status":
-            _ext_last_ping_ts = time.time()
+            # KHÔNG set _ext_last_ping_ts ở đây — /status chỉ ĐỌC trạng thái.
+            # Trước đây set rồi tính last_ping_ms ngay từ giá trị vừa set khiến
+            # last_ping_ms luôn ≈ 0ms → "extension connected" báo sai, luôn true
+            # kể cả khi extension đã ngắt kết nối thật. Timestamp chỉ nên được
+            # cập nhật bởi các request THẬT từ extension (/config, /slots,
+            # /hunt-all, /ping, /command, /scan-fields/poll).
             now = time.time()
             last_ping_ms = int((now - _ext_last_ping_ts) * 1000) if _ext_last_ping_ts else None
             self._send_json(200, {
@@ -403,11 +445,26 @@ class _Handler(BaseHTTPRequestHandler):
             logger.info(f"[CMD] queued #{cmd['id']} type={cmd_type}")
             self._send_json(200, {"ok": True, "id": cmd["id"]})
         elif self.path == "/config":
-            cfg = load_config()
-            cfg.update({k: v for k, v in data.items() if k in DEFAULT_CONFIG})
-            if "auto_seat" in data and isinstance(data["auto_seat"], dict):
-                cfg["auto_seat"].update(data["auto_seat"])
-            save_config(cfg)
+            with _config_lock:
+                cfg = load_config()
+                # LƯU Ý: "auto_seat" bị loại khỏi update() nông ở đây — để khối
+                # deep-merge bên dưới là nơi DUY NHẤT ghi vào cfg["auto_seat"].
+                # Trước đó "auto_seat" cũng nằm trong DEFAULT_CONFIG nên bị dòng
+                # update() này ghi đè NGUYÊN CỤC trước khi deep-merge kịp chạy —
+                # khiến deep-merge vô nghĩa (merge pv vào chính pv) và còn tệ hơn
+                # bug gốc: xoá sạch luôn các platform khác không có trong data.
+                cfg.update({k: v for k, v in data.items()
+                            if k in DEFAULT_CONFIG and k != "auto_seat"})
+                if "auto_seat" in data and isinstance(data["auto_seat"], dict):
+                    # Deep-merge theo từng platform (1zone/ticketbox/ctiket) — tránh
+                    # .update() nông xoá mất zone_priority/items/... khi client chỉ
+                    # gửi partial data cho 1 platform (vd chỉ {"quantity": 5}).
+                    for pk, pv in data["auto_seat"].items():
+                        if isinstance(pv, dict):
+                            cfg["auto_seat"].setdefault(pk, {}).update(pv)
+                        else:
+                            cfg["auto_seat"][pk] = pv
+                save_config(cfg)
             if _app_ref:
                 _app_ref.after(0, _app_ref.load_config_to_ui)
             self._send_json(200, {"ok": True})
@@ -416,9 +473,10 @@ class _Handler(BaseHTTPRequestHandler):
             # Body: {"slots": [...]}
             slots = data.get("slots")
             if isinstance(slots, list):
-                cfg = load_config()
-                cfg["seat_slots"] = slots
-                save_config(cfg)
+                with _config_lock:
+                    cfg = load_config()
+                    cfg["seat_slots"] = slots
+                    save_config(cfg)
                 if _app_ref:
                     _app_ref.after(0, _app_ref._reload_slots_ui)
                 self._send_json(200, {"ok": True})
@@ -612,7 +670,11 @@ def _solve_captcha(data):
 
 
 def start_api_server():
-    server = HTTPServer(("127.0.0.1", API_PORT), _Handler)
+    # ThreadingHTTPServer: mỗi request xử lý trên 1 thread riêng, tránh 1 request
+    # chậm (VD /solve dùng cv2) làm nghẽn toàn bộ request khác đang chờ — quan
+    # trọng khi có nhiều tab/nhiều Chrome profile cùng poll liên tục mỗi 3s.
+    server = ThreadingHTTPServer(("127.0.0.1", API_PORT), _Handler)
+    server.daemon_threads = True  # thread con tự chết theo process chính, tránh treo khi thoát app
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     return server
@@ -846,7 +908,7 @@ class App(ctk.CTk):
         global _app_ref
         _app_ref = self
 
-        self.title("Săn Vé Pro v2.0")
+        self.title("Săn Vé")
         self.geometry("960x760")
         self.configure(fg_color=C_BG)
         self.resizable(True, True)
@@ -854,6 +916,8 @@ class App(ctk.CTk):
         self._seat_map_rows = []
         self._zone_priority_rows = []
         self._slot_rows = []
+        self._editing_slot_idx = None       # None = đang sửa config chung
+        self._editing_slot_auto_seat = None  # buffer auto_seat khi đang sửa 1 slot
         self._build_ui()
         self.load_config_to_ui()
         self._api_server = start_api_server()
@@ -902,6 +966,22 @@ class App(ctk.CTk):
         self.tab_frame = ctk.CTkScrollableFrame(left, fg_color="transparent", corner_radius=0)
         self.tab_frame.grid(row=1, column=0, padx=0, pady=0, sticky="nsew")
         self.tab_frame.grid_columnconfigure(0, weight=1)
+
+        # Banner cảnh báo "đang sửa slot X" — nằm cố định trên đầu, ẩn mặc định
+        self._edit_banner = ctk.CTkFrame(self.tab_frame, fg_color="#78350f", corner_radius=6)
+        self._edit_banner.grid(row=0, column=0, padx=12, pady=(8,0), sticky="ew")
+        self._edit_banner.grid_columnconfigure(0, weight=1)
+        self._edit_banner_lbl = ctk.CTkLabel(
+            self._edit_banner, text="", font=("Arial", 11, "bold"),
+            text_color="#fde68a", anchor="w", wraplength=280,
+        )
+        self._edit_banner_lbl.grid(row=0, column=0, padx=(10,4), pady=6, sticky="w")
+        ctk.CTkButton(self._edit_banner, text="✕ Thoát sửa slot", width=100, height=26,
+                      fg_color="#92400e", hover_color="#b45309", text_color="white",
+                      font=("Arial", 10), corner_radius=6,
+                      command=lambda: self._stop_edit_slot()
+                      ).grid(row=0, column=1, padx=(4,10), pady=6)
+        self._edit_banner.grid_remove()
 
         # Bottom buttons
         btn_frame = ctk.CTkFrame(left, fg_color="transparent")
@@ -960,6 +1040,21 @@ class App(ctk.CTk):
         self.log_box = ctk.CTkTextbox(right, font=("Consolas", 11), state="disabled",
                                        fg_color=C_PANEL2, wrap="word")
         self.log_box.grid(row=1, column=0, padx=12, pady=(0,12), sticky="nsew")
+
+        # FIX: dùng tag CỐ ĐỊNH theo màu (6 tag, config 1 lần) thay vì tạo tag
+        # MỚI theo từng giây log — trước đây mỗi dòng log tạo 1 tag riêng
+        # (tag_config(ts,...)) không bao giờ bị xoá, khiến bảng tag của Text
+        # widget phình to vô hạn qua thời gian, làm app càng chạy lâu càng đơ.
+        for _cname, _cval in LOG_COLORS.items():
+            self.log_box.tag_config(_cname, foreground=_cval)
+
+        # FIX: gộp nhiều dòng log gần nhau thành 1 lần update UI (xem add_log/
+        # _flush_log_queue) — trước đây mỗi dòng log gọi .after(0,...) riêng,
+        # khi hunt nhiều tab hàng chục request /log dồn dập mỗi giây khiến Tk
+        # mainloop nghẽn dần, gây "Not Responding".
+        self._log_queue = []
+        self._log_queue_lock = threading.Lock()
+        self.after(100, self._flush_log_queue)
 
         # Build tabs
         self._build_tab_seat()
@@ -1041,7 +1136,7 @@ class App(ctk.CTk):
                       ).grid(row=0, column=0, padx=(0, 4))
 
         ctk.CTkLabel(slot_header,
-                     text="Extension chọn slot per-tab qua popup",
+                     text="Bấm ＋ sẽ tự Lưu cấu hình hiện tại rồi nhân bản thành slot mới",
                      font=("Arial", 9), text_color="#475569"
                      ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
@@ -1094,7 +1189,31 @@ class App(ctk.CTk):
         self.chk_require_adjacent.grid(row=12, column=0, padx=16, pady=(0,8), sticky="w")
 
 
-    # ── Slot management ───────────────────────────────────────────────────────
+    def _format_slot_summary(self, auto_seat):
+        """Text tóm tắt cấu hình ghế đã set trong 1 slot — dùng cho preview 👁."""
+        lines = []
+        for platform, pk in _PLATFORM_KEY_MAP.items():
+            seat_cfg = (auto_seat or {}).get(pk) or {}
+            mode = seat_cfg.get("seat_mode", "seat_zone")
+            is_zone_mode = (platform == "Ctiket") or (mode == "seat_zone")
+            mode_label = MODE_LABEL_ZONE if is_zone_mode else MODE_LABEL_MAP
+
+            rows = []
+            if is_zone_mode:
+                for it in (seat_cfg.get("items") or []):
+                    rows.append(f"    • {it.get('zone','?')} — SL{it.get('quantity',1)}")
+            else:
+                for it in (seat_cfg.get("seat_map_priorities") or []):
+                    if isinstance(it, dict):
+                        rows.append(f"    • {it.get('raw','?')} — SL{it.get('quantity',1)}")
+                    else:
+                        rows.append(f"    • {it}")
+            if not rows:
+                rows = ["    • (chưa cấu hình)"]
+
+            lines.append(f"{platform} ({mode_label}):")
+            lines.extend(rows)
+        return "\n".join(lines)
 
     def _reload_slots_ui(self):
         """Đọc slots từ config và re-render danh sách."""
@@ -1111,13 +1230,18 @@ class App(ctk.CTk):
             self._slots_list_frame.grid()
         else:
             self._slots_list_frame.grid_remove()
+        self._update_edit_banner()
 
     def _render_slot_row(self, idx, slot):
-        """Vẽ 1 dòng slot: [tên] [copy] [xóa]"""
+        """Vẽ 1 dòng slot: [tên] [👁 xem] [✏️ sửa] [📋 copy] [✕ xóa] + panel chi tiết."""
         rf = ctk.CTkFrame(self._slots_list_frame, fg_color="#111827",
                           corner_radius=6)
         rf.grid(row=idx, column=0, pady=(0, 3), sticky="ew")
         rf.grid_columnconfigure(0, weight=1)
+
+        is_editing = (self._editing_slot_idx == idx)
+        if is_editing:
+            rf.configure(border_width=1, border_color="#facc15")
 
         name_var = ctk.StringVar(value=slot.get("name", f"Slot {idx+1}"))
 
@@ -1137,23 +1261,66 @@ class App(ctk.CTk):
         name_entry.bind("<FocusOut>", _save_name)
         name_entry.bind("<Return>", _save_name)
 
+        # Panel chi tiết — ẩn mặc định, hiện khi bấm nút 👁
+        detail_lbl = ctk.CTkLabel(
+            rf, text=self._format_slot_summary(slot.get("auto_seat", {})),
+            font=("Consolas", 10), text_color="#94a3b8", justify="left",
+            anchor="w", wraplength=340,
+        )
+        detail_lbl.grid(row=1, column=0, columnspan=5, padx=(6,6), pady=(0,6), sticky="ew")
+        detail_lbl.grid_remove()
+
+        def _toggle_detail(lbl=detail_lbl, i=idx):
+            if lbl.winfo_ismapped():
+                lbl.grid_remove()
+                return
+            cfg = load_config()
+            slots = cfg.get("seat_slots", [])
+            if i < len(slots):
+                lbl.configure(text=self._format_slot_summary(slots[i].get("auto_seat", {})))
+            lbl.grid()
+
+        ctk.CTkButton(rf, text="👁", width=28, height=28, font=("Arial", 11),
+                      fg_color="#312e81", hover_color="#3730a3", text_color="#c7d2fe",
+                      corner_radius=6,
+                      command=_toggle_detail
+                      ).grid(row=0, column=1, padx=(0, 2), pady=4)
+
+        edit_fg = "#78350f" if is_editing else "#3f2d0a"
+        ctk.CTkButton(rf, text="✏️", width=28, height=28, font=("Arial", 11),
+                      fg_color=edit_fg, hover_color="#92400e", text_color="#fcd34d",
+                      corner_radius=6,
+                      command=lambda i=idx: self._start_edit_slot(i)
+                      ).grid(row=0, column=2, padx=(0, 2), pady=4)
+
         ctk.CTkButton(rf, text="📋", width=28, height=28, font=("Arial", 11),
                       fg_color="#1e3a5f", hover_color="#1e40af", text_color="#93c5fd",
                       corner_radius=6,
                       command=lambda i=idx: self._copy_slot(i)
-                      ).grid(row=0, column=1, padx=(0, 2), pady=4)
+                      ).grid(row=0, column=3, padx=(0, 2), pady=4)
 
         ctk.CTkButton(rf, text="✕", width=28, height=28, font=("Arial", 11),
                       fg_color="#7f1d1d", hover_color="#991b1b", text_color="#fca5a5",
                       corner_radius=6,
                       command=lambda i=idx: self._remove_slot(i)
-                      ).grid(row=0, column=2, padx=(0, 6), pady=4)
+                      ).grid(row=0, column=4, padx=(0, 6), pady=4)
 
         self._slot_rows.append((name_var, slot, rf))
 
     def _add_slot(self):
-        """Thêm slot mới — clone từ config global hiện tại."""
+        """Thêm slot mới — clone từ config hiện tại.
+
+        Tự động gọi _save_config() (y hệt bấm nút "Lưu") trước khi clone,
+        đảm bảo slot mới luôn khớp với những gì đang hiển thị trên UI —
+        tránh trường hợp gõ xong quên Lưu rồi bấm "+" bị clone nhầm cấu
+        hình cũ. Nếu đang ở chế độ sửa 1 slot khác thì thoát ra trước
+        (để không nhân bản nhầm dữ liệu slot đang sửa thành config chung).
+        """
         import copy
+        if self._editing_slot_idx is not None:
+            self.add_log("ℹ️ Thoát chế độ sửa slot trước khi thêm slot mới.", "yellow")
+            self._stop_edit_slot()
+        self._save_config()
         cfg = load_config()
         slots = cfg.get("seat_slots", [])
         new_slot = {
@@ -1164,7 +1331,7 @@ class App(ctk.CTk):
         cfg["seat_slots"] = slots
         save_config(cfg)
         self._reload_slots_ui()
-        self.add_log(f"✅ Đã thêm {new_slot['name']} (clone từ config hiện tại)", "green")
+        self.add_log(f"✅ Đã tự lưu cấu hình hiện tại + thêm {new_slot['name']}", "green")
 
     def _copy_slot(self, idx):
         """Nhân bản 1 slot."""
@@ -1185,17 +1352,83 @@ class App(ctk.CTk):
         self.add_log(f"📋 Đã nhân bản {src.get('name', f'Slot {idx+1}')}", "green")
 
     def _remove_slot(self, idx):
-        """Xóa slot theo index."""
+        """Xóa slot theo index — có hỏi xác nhận trước (trước đây xóa thẳng)."""
         cfg = load_config()
         slots = cfg.get("seat_slots", [])
         if idx >= len(slots):
             return
         name = slots[idx].get("name", f"Slot {idx+1}")
+
+        confirm = messagebox.askyesno(
+            "Xác nhận xóa slot",
+            f"Xóa \"{name}\"?\n\nKhông thể hoàn tác. Cấu hình ghế đã set trong slot này "
+            f"sẽ mất — nếu chưa chắc, bấm 👁 xem lại trước khi xóa.",
+            icon="warning",
+        )
+        if not confirm:
+            return
+
         slots.pop(idx)
         cfg["seat_slots"] = slots
         save_config(cfg)
+
+        # Nếu đang sửa đúng slot vừa xóa → thoát chế độ sửa
+        if self._editing_slot_idx == idx:
+            self._editing_slot_idx = None
+            self._editing_slot_auto_seat = None
+            self._load_seat_config_for(self._platform_value)
+        elif self._editing_slot_idx is not None and self._editing_slot_idx > idx:
+            # Các slot sau bị dịch chỉ số lên 1 do vừa xóa 1 slot phía trước
+            self._editing_slot_idx -= 1
+
         self._reload_slots_ui()
         self.add_log(f"🗑 Đã xóa {name}", "yellow")
+
+    # ── Sửa slot tại chỗ (edit-in-place) ────────────────────────────────────────
+
+    def _start_edit_slot(self, idx):
+        """Nạp cấu hình của 1 slot lên UI 'Chọn ghế' để sửa trực tiếp.
+        Bấm 'Lưu' lúc này sẽ ghi ĐÈ vào đúng slot đó — KHÔNG đụng config chung."""
+        import copy
+        cfg = load_config()
+        slots = cfg.get("seat_slots", [])
+        if idx >= len(slots):
+            return
+        self._editing_slot_idx = idx
+        self._editing_slot_auto_seat = copy.deepcopy(slots[idx].get("auto_seat", {}))
+        self._switch_tab("seat")
+        self._load_seat_config_for(self._platform_value)
+        self._update_edit_banner()
+        self._reload_slots_ui()
+        self.add_log(
+            f"✏️ Đang sửa \"{slots[idx].get('name', f'Slot {idx+1}')}\" — "
+            f"bấm 'Lưu' để ghi lại vào slot này (không ảnh hưởng config chung).",
+            "yellow")
+
+    def _stop_edit_slot(self):
+        """Thoát chế độ sửa slot, quay về sửa config chung."""
+        self._editing_slot_idx = None
+        self._editing_slot_auto_seat = None
+        self._load_seat_config_for(self._platform_value)
+        self._update_edit_banner()
+        self._reload_slots_ui()
+
+    def _update_edit_banner(self):
+        """Hiện/ẩn banner vàng báo đang sửa slot nào (nằm trên đầu tab Chọn ghế)."""
+        if not hasattr(self, "_edit_banner"):
+            return
+        if self._editing_slot_idx is not None:
+            cfg = load_config()
+            slots = cfg.get("seat_slots", [])
+            name = (slots[self._editing_slot_idx].get("name", f"Slot {self._editing_slot_idx+1}")
+                    if self._editing_slot_idx < len(slots) else "Slot")
+            self._edit_banner_lbl.configure(
+                text=f"✏️ Đang sửa \"{name}\" — Lưu sẽ ghi vào slot này, không đụng config chung.")
+            self._edit_banner.grid()
+        else:
+            self._edit_banner.grid_remove()
+
+
 
     def _build_dynamic_zone(self):
         """UI chọn zone (1Zone/Ticketbox): mỗi dòng có Tên zone + Số lượng riêng.
@@ -1345,12 +1578,9 @@ class App(ctk.CTk):
         self._load_seat_config_for(platform)
         self._update_qty_field_visibility()
 
-    def _save_seat_config_for(self, platform):
-        """Lưu phần auto_seat[platform] hiện tại trên UI vào self._cfg (chưa ghi file)."""
-        pk = _PLATFORM_KEY_MAP.get(platform, "1zone")
-        mode = "seat_zone" if platform == "Ctiket" else _label_to_mode(self.sel_mode.get())
-
-        seat_cfg = self._cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
+    def _apply_seat_ui_to_dict(self, seat_cfg, platform, mode):
+        """Đọc toàn bộ UI hiện tại (ưu tiên, SL, 2 checkbox) và ghi vào seat_cfg (dict).
+        Dùng chung cho cả 2 đường: lưu config chung VÀ lưu vào 1 slot đang sửa."""
         seat_cfg["seat_mode"]        = mode
         seat_cfg["allow_partial"]    = self.var_allow_partial.get()
         seat_cfg["require_adjacent"] = self.var_require_adjacent.get()
@@ -1359,14 +1589,14 @@ class App(ctk.CTk):
             self._refresh_ctiket_rows()
             items = [r.get_value() for r in self._ctiket_zone_rows if r.get_value()]
             seat_cfg["items"] = items
-            # Backward compat: lưu thêm zone_priority để extension cũ không bị lỗi
             seat_cfg["zone_priority"] = [i["zone"] for i in items]
-            seat_cfg["quantity"] = sum(i["quantity"] for i in items)
+            seat_cfg["priority_targets"] = [i["zone"] for i in items]
+            seat_cfg["quantity"] = sum(i["quantity"] for i in items) if items else 1
+            seat_cfg["seat_map_priorities"] = []
         elif mode == "seat_zone":
             self._refresh_zone_priority_rows()
             items = [r.get_value() for r in self._zone_priority_rows if r.get_value()]
             seat_cfg["items"] = items
-            # Backward compat: extension cũ đọc zone_priority (list tên) + quantity chung
             seat_cfg["zone_priority"]    = [i["zone"] for i in items]
             seat_cfg["priority_targets"] = [i["zone"] for i in items]
             seat_cfg["quantity"]         = sum(i["quantity"] for i in items) if items else 1
@@ -1375,7 +1605,6 @@ class App(ctk.CTk):
             self._refresh_seat_rows()
             priorities = [r.get_value() for r in self._seat_map_rows if r.get_value()]
             seat_cfg["seat_map_priorities"] = priorities
-            # Backward compat: extension cũ đọc zone_priority (list string) + quantity chung
             seat_cfg["zone_priority"]        = priorities
             seat_cfg["priority_targets"]     = priorities
             seat_cfg["quantity"] = max([p["quantity"] for p in priorities], default=1)
@@ -1385,11 +1614,32 @@ class App(ctk.CTk):
                     f"⚠️ {orphan_n} dòng có 'Ghế số' nhưng thiếu 'Hàng' — "
                     f"(các) dòng này bị BỎ QUA khi lưu. Điền 'Hàng' để dòng có hiệu lực.",
                     "yellow")
+        return seat_cfg
+
+    def _save_seat_config_for(self, platform):
+        """Lưu phần auto_seat[platform] hiện tại trên UI (chưa ghi file).
+        Nếu đang ở chế độ sửa 1 slot (self._editing_slot_idx != None), ghi vào
+        buffer của slot đó thay vì self._cfg["auto_seat"] (config chung)."""
+        pk = _PLATFORM_KEY_MAP.get(platform, "1zone")
+        mode = "seat_zone" if platform == "Ctiket" else _label_to_mode(self.sel_mode.get())
+
+        if self._editing_slot_idx is not None:
+            self._editing_slot_auto_seat.setdefault(pk, _default_seat_cfg())
+            seat_cfg = self._editing_slot_auto_seat[pk]
+        else:
+            seat_cfg = self._cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
+
+        self._apply_seat_ui_to_dict(seat_cfg, platform, mode)
 
     def _load_seat_config_for(self, platform):
-        """Đọc auto_seat[platform] từ self._cfg, render lên UI."""
+        """Đọc auto_seat[platform] rồi render lên UI — nếu đang sửa 1 slot
+        (self._editing_slot_idx != None) thì đọc từ buffer của slot đó,
+        ngược lại đọc từ self._cfg (config chung)."""
         pk = _PLATFORM_KEY_MAP.get(platform, "1zone")
-        as_ = self._cfg.get("auto_seat", {}).get(pk, _default_seat_cfg())
+        if self._editing_slot_idx is not None:
+            as_ = (self._editing_slot_auto_seat or {}).get(pk) or _default_seat_cfg()
+        else:
+            as_ = self._cfg.get("auto_seat", {}).get(pk, _default_seat_cfg())
 
         mode = as_.get("seat_mode", "seat_zone")
         self.sel_mode.set(_mode_to_label(mode))
@@ -1627,13 +1877,15 @@ class App(ctk.CTk):
         self._tab_info_frame.grid_forget()
 
         if tab == "seat":
-            self._tab_seat_frame.grid(row=0, column=0, sticky="ew")
+            self._tab_seat_frame.grid(row=1, column=0, sticky="ew")
             self.btn_tab_seat.configure(fg_color=C_ACCENT, text_color="#0f172a")
             self.btn_tab_info.configure(fg_color=C_BORDER, text_color=C_MUTED)
+            self._update_edit_banner()
         else:
-            self._tab_info_frame.grid(row=0, column=0, sticky="ew")
+            self._tab_info_frame.grid(row=1, column=0, sticky="ew")
             self.btn_tab_info.configure(fg_color=C_ACCENT, text_color="#0f172a")
             self.btn_tab_seat.configure(fg_color=C_BORDER, text_color=C_MUTED)
+            self._edit_banner.grid_remove()
 
     # ── Config IO ─────────────────────────────────────────────────────────────
 
@@ -1685,38 +1937,31 @@ class App(ctk.CTk):
         pk = _PLATFORM_KEY_MAP.get(platform, "1zone")
         mode = "seat_zone" if platform == "Ctiket" else _label_to_mode(self.sel_mode.get())
 
-        seat_cfg = cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
-        seat_cfg["seat_mode"]        = mode
-        seat_cfg["allow_partial"]    = self.var_allow_partial.get()
-        seat_cfg["require_adjacent"] = self.var_require_adjacent.get()
-
-        if platform == "Ctiket":
-            self._refresh_ctiket_rows()
-            items = [r.get_value() for r in self._ctiket_zone_rows if r.get_value()]
-            seat_cfg["items"] = items
-            seat_cfg["zone_priority"] = [i["zone"] for i in items]
-            seat_cfg["quantity"] = sum(i["quantity"] for i in items)
-        elif mode == "seat_zone":
-            self._refresh_zone_priority_rows()
-            items = [r.get_value() for r in self._zone_priority_rows if r.get_value()]
-            seat_cfg["items"] = items
-            seat_cfg["zone_priority"]    = [i["zone"] for i in items]
-            seat_cfg["priority_targets"] = [i["zone"] for i in items]
-            seat_cfg["quantity"]         = sum(i["quantity"] for i in items) if items else 1
-            seat_cfg["seat_map_priorities"] = []
-        else:
-            self._refresh_seat_rows()
-            priorities = [r.get_value() for r in self._seat_map_rows if r.get_value()]
-            seat_cfg["seat_map_priorities"] = priorities
-            seat_cfg["zone_priority"]        = priorities
-            seat_cfg["priority_targets"]     = priorities
-            seat_cfg["quantity"] = max([p["quantity"] for p in priorities], default=1)
-            orphan_n = sum(1 for r in self._seat_map_rows if r.has_orphan_seat())
-            if orphan_n:
+        if self._editing_slot_idx is not None:
+            # Đang sửa 1 slot → ghi vào ĐÚNG slot đó, KHÔNG đụng auto_seat chung
+            slots = cfg.get("seat_slots", [])
+            idx = self._editing_slot_idx
+            if idx >= len(slots):
+                self.add_log("⚠️ Slot đang sửa không còn tồn tại (có thể vừa bị xóa) — hủy lưu vào slot.", "yellow")
+                self._editing_slot_idx = None
+                self._editing_slot_auto_seat = None
+                self._update_edit_banner()
+            else:
+                self._editing_slot_auto_seat.setdefault(pk, _default_seat_cfg())
+                seat_cfg = self._editing_slot_auto_seat[pk]
+                self._apply_seat_ui_to_dict(seat_cfg, platform, mode)
+                slots[idx]["auto_seat"] = self._editing_slot_auto_seat
+                cfg["seat_slots"] = slots
+                save_config(cfg)
+                self._cfg = cfg
+                self._reload_slots_ui()
                 self.add_log(
-                    f"⚠️ {orphan_n} dòng có 'Ghế số' nhưng thiếu 'Hàng' — "
-                    f"(các) dòng này bị BỎ QUA khi lưu. Điền 'Hàng' để dòng có hiệu lực.",
-                    "yellow")
+                    f"💾 Đã lưu vào \"{slots[idx].get('name', f'Slot {idx+1}')}\" "
+                    f"(không ảnh hưởng config chung).", "green")
+                return
+
+        seat_cfg = cfg["auto_seat"].setdefault(pk, _default_seat_cfg())
+        self._apply_seat_ui_to_dict(seat_cfg, platform, mode)
 
         save_config(cfg)
         self._cfg = cfg
@@ -1728,21 +1973,33 @@ class App(ctk.CTk):
     # ── Log ───────────────────────────────────────────────────────────────────
 
     def add_log(self, msg, color="white"):
-        ts  = datetime.now().strftime("%H:%M:%S")
-        clr = LOG_COLORS.get(color, C_TEXT)
+        ts   = datetime.now().strftime("%H:%M:%S")
+        tag  = color if color in LOG_COLORS else "white"
         full = f"[{ts}] {msg}\n"
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", full)
-        self.log_box.tag_add(ts, f"end - {len(full)+1}c", "end - 1c")
-        self.log_box.tag_config(ts, foreground=clr)
-        self.log_box.configure(state="disabled")
-        self.log_box.see("end")
+        # Chỉ đẩy vào queue — KHÔNG đụng widget trực tiếp ở đây. Việc update
+        # UI thật sự do _flush_log_queue() làm theo chu kỳ 100ms, gộp nhiều
+        # dòng lại thành 1 lần thao tác widget (xem comment ở nơi khởi tạo).
+        with self._log_queue_lock:
+            self._log_queue.append((full, tag))
         logger.info(msg)
 
+    def _flush_log_queue(self):
+        with self._log_queue_lock:
+            pending, self._log_queue = self._log_queue, []
+        if pending:
+            self.log_box.configure(state="normal")
+            for full, tag in pending:
+                start = self.log_box.index("end-1c")
+                self.log_box.insert("end", full)
+                self.log_box.tag_add(tag, start, "end-1c")
+            self.log_box.configure(state="disabled")
+            self.log_box.see("end")
+        self.after(100, self._flush_log_queue)
+
     def _run_all_tabs(self):
-        """Báo hiệu background broadcast HUNT_NOW vào tất cả tab."""
-        global _hunt_all_pending
-        _hunt_all_pending = True
+        """Báo hiệu background broadcast HUNT_NOW vào tất cả tab (mọi Chrome profile)."""
+        global _hunt_all_version
+        _hunt_all_version += 1
         self.add_log("🚀 Đã gửi lệnh Chạy tất cả tab!", "green")
 
     def _export_log(self):

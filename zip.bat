@@ -11,7 +11,7 @@ REM   - extension\         (Chrome extension folder)
 
 setlocal EnableDelayedExpansion
 
-set VERSION=2.0.0
+set VERSION=2.0
 set ZIP_NAME=SanVePro-v%VERSION%.zip
 
 echo.
@@ -50,12 +50,22 @@ REM ── Xoá staging, chỉ giữ zip ─────────────
 del "release\SanVePro.exe"
 rmdir /s /q "release\extension"
 
-REM ── Copy file hướng dẫn .txt (KHÔNG đưa vào zip, để cạnh zip) ───────────────
-if exist "HUONG_DAN_CAI_DAT.txt" (
-    copy "HUONG_DAN_CAI_DAT.txt" "release\" >nul
-    echo [OK] Da copy HUONG_DAN_CAI_DAT.txt vao release\
+REM ── Copy file hướng dẫn .docx (KHÔNG đưa vào zip, để cạnh zip) ───────────────
+set GUIDE1=HUONG_DAN_CHON_GHE.docx
+set GUIDE2=HUONG_DAN_CAI_DAT.docx
+
+if exist "%GUIDE1%" (
+    copy "%GUIDE1%" "release\" >nul
+    echo [OK] Da copy %GUIDE1% vao release\
 ) else (
-    echo [!] Khong tim thay HUONG_DAN_CAI_DAT.txt o root - skip
+    echo [!] Khong tim thay %GUIDE1% o root - skip
+)
+
+if exist "%GUIDE2%" (
+    copy "%GUIDE2%" "release\" >nul
+    echo [OK] Da copy %GUIDE2% vao release\
+) else (
+    echo [!] Khong tim thay %GUIDE2% o root - skip
 )
 
 for %%A in ("release\%ZIP_NAME%") do set ZSIZE=%%~zA
@@ -66,10 +76,11 @@ echo ============================================================
 echo   ĐÓNG GÓI THÀNH CÔNG
 echo ============================================================
 echo.
-echo   Folder release\ co 2 file:
+echo   Folder release\ co 3 file:
 echo     - %ZIP_NAME%      (!ZSIZEMB! MB - file chinh)
-echo     - HUONG_DAN_CAI_DAT.txt   (gui kem cho khach doc)
+echo     - %GUIDE1%
+echo     - %GUIDE2%
 echo.
-echo   Gui CA 2 FILE cho khach.
+echo   Gui CA 3 FILE cho khach.
 echo.
 pause
