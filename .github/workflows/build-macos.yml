@@ -1,13 +1,16 @@
 name: Build macOS App
 
 on:
-  workflow_dispatch:      # bấm nút "Run workflow" trên GitHub để build thủ công
+  workflow_dispatch:
   push:
     branches: [ main ]
     paths:
       - 'app/**'
       - 'SanVePro_mac.spec'
       - '.github/workflows/build-macos.yml'
+
+permissions:
+  contents: write   # cần quyền này để tạo Release
 
 jobs:
   build-macos:
@@ -29,14 +32,28 @@ jobs:
       - name: Build .app
         run: pyinstaller SanVePro_mac.spec --noconfirm --clean
 
-      - name: Remove quarantine + zip
+      - name: Remove quarantine + zip (giữ symlink/permission chuẩn macOS)
         run: |
           xattr -cr dist/SanVePro.app || true
-          cd dist
-          ditto -c -k --sequesterRsrc --keepParent SanVePro.app SanVePro-macOS.zip
+          mkdir -p release
+          cp -R extension release/extension
+          cp -R dist/SanVePro.app release/SanVePro.app
+          cd release
+          ditto -c -k --sequesterRsrc --keepParent . ../SanVePro-macOS.zip
 
-      - name: Upload artifact
+      - name: Upload artifact (backup, cần login GitHub mới tải được)
         uses: actions/upload-artifact@v4
         with:
           name: SanVePro-macOS
-          path: dist/SanVePro-macOS.zip
+          path: SanVePro-macOS.zip
+
+      - name: Publish Release (link tải công khai, không cần login)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-macos
+          name: SanVePro macOS (latest)
+          files: SanVePro-macOS.zip
+          fail_on_unmatched_files: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
