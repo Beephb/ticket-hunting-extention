@@ -1,0 +1,42 @@
+name: Build macOS App
+
+on:
+  workflow_dispatch:      # bấm nút "Run workflow" trên GitHub để build thủ công
+  push:
+    branches: [ main ]
+    paths:
+      - 'app/**'
+      - 'SanVePro_mac.spec'
+      - '.github/workflows/build-macos.yml'
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt
+          pip install pyinstaller
+
+      - name: Build .app
+        run: pyinstaller SanVePro_mac.spec --noconfirm --clean
+
+      - name: Remove quarantine + zip
+        run: |
+          xattr -cr dist/SanVePro.app || true
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent SanVePro.app SanVePro-macOS.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SanVePro-macOS
+          path: dist/SanVePro-macOS.zip
