@@ -230,8 +230,12 @@ async function huntCtiket(cfg, autoSeat = true) {
 
   svpLog(`✅ [Ctiket] eventId: ${eventId} | occurrenceId: ${finalOcid || "(không có)"}`, "green");
 
-  // Set hunt flag truoc khi navigate — chi khi autoSeat=true
+  // Set flag truoc khi navigate, de queue_watcher (runner.js) biet ma kich hoat:
+  //  - autoSeat=true  → hunt_done flag (cho phep ca queue_watcher LAN auto-chon-ghe sau)
+  //  - autoSeat=false → chi flag rieng cho queue_watcher (KHONG cho phep auto-chon-ghe,
+  //    dung y dinh "chi san ve" — qua duoc queue nhung nguoi tu chon ghe thu cong)
   if (autoSeat) sessionStorage.setItem("__svp_hunt_done__", String(Date.now()));
+  else sessionStorage.setItem("__svp_ck_queue_only__", String(Date.now()));
 
   await directCtiketNav(eventId, finalOcid);
 }

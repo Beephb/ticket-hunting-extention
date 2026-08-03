@@ -656,6 +656,7 @@ async function runTicketboxSeatMap(cfg) {
       const quantity = priorityItems[pidx].quantity;
       const parsed = parsePriorityTbMap(target);
       svpLog(`🎯 Ưu tiên ${pidx+1}: ${target} | SL=${quantity} | type=${parsed.type}`, "yellow");
+      window.svpUpdateHuntTarget?.(`${target} (SL${quantity})`);
 
       let candidateSections = sections;
       // FIX bug: lọc theo zoneFilter cho MỌI type (trước đây chỉ lọc khi

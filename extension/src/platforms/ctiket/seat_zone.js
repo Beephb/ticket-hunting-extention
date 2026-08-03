@@ -68,6 +68,20 @@ async function waitForElement(selector, timeoutMs = 8000, intervalMs = 100) {
   return null;
 }
 
+// Giống waitForElement nhưng dùng hàm tìm tùy chỉnh (finderFn) thay vì 1 selector cố định —
+// cho phép multi-selector fallback + check disabled (vd nút "Tiếp tục" match theo id HOẶC text).
+// Thay cho pattern cũ "chờ mù N ms rồi query 1 lần": nhanh hơn khi element render sớm,
+// robust hơn khi render chậm (không fail oan sau đúng N ms cố định).
+async function waitForCondition(finderFn, timeoutMs = 8000, intervalMs = 100) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const el = finderFn();
+    if (el) return el;
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  return null;
+}
+
 // Điền value vào input theo cách React nhận được (simulate native setter + input event)
 function fillReactInput(input, value) {
   input.focus();
@@ -97,6 +111,47 @@ function normalizePhoneVN(phone) {
 
 // ── Step 1: Chọn zone + click Tiếp tục ───────────────────────────────────────
 
+// State giỏ hàng đã click theo zone, PERSIST qua các lần retry (outer loop trong
+// runner.js gọi lại runCtiketSeatZone/ckStep1SelectZone nhiều lần trên cùng 1 trang
+// khi zone het ve tam thoi). Key theo eventId de khong bi lan sang session/event khac.
+//   { [eventId]: { [zoneName]: soLuongDaAddVaoGio } }
+let _ckCartState = {};
+
+function ckGetCartQty(eventId, zoneName) {
+  return (_ckCartState[eventId] && _ckCartState[eventId][zoneName]) || 0;
+}
+function ckAddCartQty(eventId, zoneName, delta) {
+  if (!_ckCartState[eventId]) _ckCartState[eventId] = {};
+  _ckCartState[eventId][zoneName] = (_ckCartState[eventId][zoneName] || 0) + delta;
+}
+function ckClearCartState(eventId) {
+  delete _ckCartState[eventId];
+}
+
+// Modal "Ve tam het" cua Ctiket: <dialog class="modal modal-open" open aria-modal="true">
+// chua text "Vé tạm hết ... Chọn lại số vé". Phat hien qua thuc te (testWatchSoldOut).
+function ckFindSoldOutModal() {
+  const dialog = document.querySelector("dialog.modal.modal-open, dialog[open].modal");
+  if (!dialog) return null;
+  const txt = dialog.textContent || "";
+  if (/h[eế]t/i.test(txt) && /v[eé]/i.test(txt)) return dialog;
+  return null;
+}
+
+// Dong modal "Ve tam het" (bam nut "Chon lai so ve" hoac nut dau tien trong dialog,
+// fallback goi dialog.close() native) — de outer retry loop lan sau khong bi modal che.
+async function ckDismissSoldOutModal() {
+  const dialog = ckFindSoldOutModal();
+  if (!dialog) return false;
+  svpLog('Ctiket: modal "Vé tạm hết" xuất hiện — đóng lại để retry...', "yellow");
+  const btn = [...dialog.querySelectorAll("button")]
+    .find(b => /chon lai|dong|ok|close/i.test(normCk(b.textContent))) || dialog.querySelector("button");
+  if (btn) btn.click();
+  else if (typeof dialog.close === "function") dialog.close();
+  await new Promise(r => setTimeout(r, 400));
+  return true;
+}
+
 // Re-query plusBtn theo tên zone (tránh stale reference sau React re-render)
 function ckFindPlusBtn(zoneName) {
   for (const wrapper of document.querySelectorAll(".ticket-wrapper")) {
@@ -109,25 +164,46 @@ function ckFindPlusBtn(zoneName) {
   return null;
 }
 
-// Click + cho 1 zone, trả về số lượng thực tế click được
-async function ckClickPlus(zoneName, quantity) {
-  let actual = 0;
-  for (let i = 0; i < quantity; i++) {
+// Click + cho 1 zone, CHỈ click phần còn THIẾU so với đã có sẵn trong giỏ từ lần
+// retry trước (tránh bug cộng dồn vượt quantity khi retry sau partial-fail).
+// Trả về TỔNG số lượng hiện có trong giỏ cho zone này (đã có trước đó + mới click).
+async function ckClickPlus(eventId, zoneName, quantity) {
+  const already = ckGetCartQty(eventId, zoneName);
+  const need = Math.max(0, quantity - already);
+  if (need === 0) {
+    svpLog(`Ctiket step1: zone "${zoneName}" da du ${already}/${quantity} ve tu lan truoc — bo qua`, "blue");
+    return already;
+  }
+
+  let addedNew = 0;
+  for (let i = 0; i < need; i++) {
     const btn = ckFindPlusBtn(zoneName);
     if (!btn || btn.disabled) {
-      svpLog(`Ctiket step1: zone "${zoneName}" het ve sau ${actual} ve`, "yellow");
+      svpLog(`Ctiket step1: zone "${zoneName}" het ve sau khi co ${already + addedNew} ve`, "yellow");
       break;
     }
     btn.click();
-    actual++;
+    addedNew++;
+    ckAddCartQty(eventId, zoneName, 1);
     await new Promise(r => setTimeout(r, 200));
+
+    // Modal hết vé thường hiện ngay sau cú click cuối — bắt liền, khỏi đợi vòng sau
+    // mới phát hiện qua disabled (nhanh hơn + còn dọn modal để lần retry sau không bị che).
+    if (ckFindSoldOutModal()) {
+      svpLog(`Ctiket step1: modal "Vé tạm hết" hiện sau click thứ ${addedNew} — dừng zone này`, "yellow");
+      await ckDismissSoldOutModal();
+      break;
+    }
   }
-  return actual;
+  return already + addedNew;
 }
 
-async function ckStep1SelectZone(zoneItems, allowPartial) {
+async function ckStep1SelectZone(eventId, zoneItems, allowPartial) {
   // zoneItems: [{zone: string, quantity: number}] — mỗi zone có số lượng riêng
   svpLog("Ctiket step1: tim zone tren trang...", "blue");
+
+  // Dọn modal "Vé tạm hết" còn sót lại từ lần retry trước (nếu có) trước khi bắt đầu
+  await ckDismissSoldOutModal();
 
   const firstWrapper = await waitForElement(".ticket-wrapper", 8000);
   if (!firstWrapper) {
@@ -142,6 +218,8 @@ async function ckStep1SelectZone(zoneItems, allowPartial) {
   for (const item of zoneItems) {
     const wanted = item.zone;
     const qty = item.quantity || 1;
+    svpLog(`🎯 Ưu tiên zone: ${wanted} | SL=${qty}`, "yellow");
+    window.svpUpdateHuntTarget?.(`${wanted} (SL${qty})`);
 
     // Tìm zone match tốt nhất còn vé
     let bestMatch = null, bestScore = 0;
@@ -161,7 +239,7 @@ async function ckStep1SelectZone(zoneItems, allowPartial) {
     }
 
     svpLog(`Ctiket step1: match "${wanted}" -> "${bestMatch}" — click + x${qty}`, "green");
-    const clicked = await ckClickPlus(bestMatch, qty);
+    const clicked = await ckClickPlus(eventId, bestMatch, qty);
     totalClicked += clicked;
 
     if (clicked < qty && !allowPartial) {
@@ -179,19 +257,21 @@ async function ckStep1SelectZone(zoneItems, allowPartial) {
     return false;
   }
 
-  svpLog(`Ctiket step1: da chon ${totalClicked}/${totalWanted} ve — click Tiep tuc`, "green");
-  await new Promise(r => setTimeout(r, 500));
+  svpLog(`Ctiket step1: da chon ${totalClicked}/${totalWanted} ve — cho nut Tiep tuc...`, "green");
 
-  const continueBtn = document.querySelector('[data-id="buy-button-continue-desktop"]')
+  const continueBtn = await waitForCondition(() =>
+    document.querySelector('[data-id="buy-button-continue-desktop"]')
     || document.querySelector('[id="buy-button-continue-desktop"]')
-    || [...document.querySelectorAll("button")].find(b => b.textContent.trim() === "Tiếp tục" && !b.disabled);
+    || [...document.querySelectorAll("button")].find(b => b.textContent.trim() === "Tiếp tục" && !b.disabled)
+  , 6000, 100);
 
   if (!continueBtn) {
-    svpLog("Ctiket step1: khong tim thay nut Tiep tuc", "red");
+    svpLog("Ctiket step1: khong tim thay nut Tiep tuc sau 6s", "red");
     return false;
   }
 
   continueBtn.click();
+  ckClearCartState(eventId);
   return true;
 }
 
@@ -240,14 +320,15 @@ async function ckStep2FillInfo(phone, cfg) {
     }
   }
 
-  await new Promise(r => setTimeout(r, 500));
+  svpLog("Ctiket step2: cho nut Cap nhat thong tin...", "blue");
 
-  // Click "Cập nhật thông tin"
-  const saveBtn = document.querySelector("#claimer-info-dialog-button-save")
-    || [...document.querySelectorAll("button")].find(b => b.textContent.trim() === "Cập nhật thông tin" && !b.disabled);
+  const saveBtn = await waitForCondition(() =>
+    document.querySelector("#claimer-info-dialog-button-save")
+    || [...document.querySelectorAll("button")].find(b => b.textContent.trim() === "Cập nhật thông tin" && !b.disabled)
+  , 6000, 100);
 
   if (!saveBtn) {
-    svpLog("Ctiket step2: khong tim thay nut Cap nhat thong tin", "red");
+    svpLog("Ctiket step2: khong tim thay nut Cap nhat thong tin sau 6s", "red");
     return false;
   }
 
@@ -323,7 +404,7 @@ async function runCtiketSeatZone(cfg) {
   }
 
   // Step 1: chọn zone
-  const step1Ok = await ckStep1SelectZone(zoneItems, allowPartial);
+  const step1Ok = await ckStep1SelectZone(eventId, zoneItems, allowPartial);
   if (!step1Ok) return false;
 
   // Step 2: điền thông tin (dialog xuất hiện sau khi click Tiếp tục ở step 1)

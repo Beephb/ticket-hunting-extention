@@ -241,11 +241,11 @@ function pickAdjacent(tickets, quantity, numOrder) {
 // ── Select tickets theo priority ──────────────────────────────────────────────
 
 function selectTickets(tickets, priorityItems, requireAdjacent = true, allowSplit = false, allowPartial = false) {
-  // FIX: bỏ yêu cầu "liền kề" (pickAdjacent) — giờ dùng quét tuần tự từng ghế
-  // (xem vòng scan trong run1ZoneSeatMap), nên hàm này chỉ còn nhiệm vụ lọc +
-  // sort ra TOÀN BỘ candidate pool khớp priority, không pre-chọn N ghế nữa.
-  // requireAdjacent/allowSplit không còn dùng ở đây — giữ tham số để tương
-  // thích signature với chỗ gọi.
+  // Hàm này chỉ lọc + sort ra TOÀN BỘ candidate pool khớp priority, không
+  // pre-chọn N ghế. Việc chọn thật (ưu tiên nhóm liền kề qua pickAdjacent(),
+  // fallback dò từng ghế rời) nằm ở run1ZoneSeatMap — xem Bước 1/Bước 2 ở đó.
+  // requireAdjacent/allowSplit không dùng trực tiếp trong hàm này — giữ tham
+  // số để tương thích signature với chỗ gọi.
   for (const item of priorityItems) {
     const raw = item.raw;
     const quantity = Math.max(1, parseInt(item.quantity) || 1);
@@ -682,52 +682,112 @@ async function run1ZoneSeatMap(cfg) {
       return false;
     }
 
-    svpLog(`🔎 Quét ${candidates.length} ghế ứng viên (${reason}), cần ${quantity} ghế (dò từng ghế, không yêu cầu liền kề)...`, "blue");
+    window.svpUpdateHuntTarget?.(`${reason} (SL${quantity})`);
 
-    // Quét tuần tự: đi qua từng ghế theo thứ tự hàng A→B→C..., ghế nào Seats.io
-    // xác nhận trống là chọn ngay, dừng khi đủ quantity. KHÔNG yêu cầu liền kề.
-    // Lặp lại tối đa maxRounds vòng nếu 1 vòng chưa đủ (phòng dò sót do timing/
-    // race — ghế vừa "Ignoring" có thể được nhả ra ở vòng sau).
     const picked = [];
     const pickedIds = new Set();
     let round = 1;
+    let gotAdjacentGroup = false;
 
-    for (round = 1; round <= maxRounds; round++) {
-      if (svpShouldStop()) { svpLog("🛑 Stop signal — abort scan", "yellow"); return false; }
-      let addedThisRound = 0;
+    // ── Bước 1: bắt buộc liền kề + cần >1 ghế → ưu tiên tìm 1 NHÓM ghế thực sự
+    // liền kề (cùng hàng, số ghế liên tiếp, hoặc cùng lẻ/chẵn liên tiếp — xem
+    // pickAdjacent) và chọn CẢ NHÓM cùng lúc trên Seats.io. Chỉ rơi xuống Bước 2
+    // (dò từng ghế rời) khi hết nhóm liền kề khả dụng. quantity=1 bỏ qua bước này.
+    if (requireAdjacent && quantity > 1) {
+      svpLog(`🔗 Ưu tiên tìm nhóm ${quantity} ghế liền kề (${reason})...`, "blue");
+      const blockedIds = new Set();
+      const maxAdjAttempts = 8;
 
-      for (const t of candidates) {
-        if (picked.length >= quantity) break;
-        if (pickedIds.has(t._id)) continue; // đã chọn được ở vòng trước rồi
+      for (let a = 1; a <= maxAdjAttempts; a++) {
         if (svpShouldStop()) { svpLog("🛑 Stop signal — abort scan", "yellow"); return false; }
+        const pool = candidates.filter(t => !blockedIds.has(t._id));
+        const group = pickAdjacent(pool, quantity);
+        if (!group.length) {
+          svpLog(`🔗 Hết nhóm liền kề khả dụng trong "${reason}" (đã thử ${a - 1} nhóm).`, "yellow");
+          break;
+        }
 
+        const labels = group.map(g => g.label).join(", ");
+        svpLog(`🔗 Thử nhóm liền kề #${a}: ${labels}`, "blue");
         let res;
         try {
-          // clear=true CHỈ ở lần chọn đầu tiên (chưa có ghế nào trên chart),
-          // các lần sau clear=false để cộng dồn, không mất ghế đã chọn.
-          res = await seatsioSelectGroup([labelVariants(t)], true, picked.length === 0);
+          res = await seatsioSelectGroup(group.map(labelVariants), false, true);
         } catch(e) {
-          continue;
+          res = { pickedLabels: [] };
         }
-        const ok = (res?.pickedLabels || []).length > 0;
-        if (ok) {
-          picked.push(t);
-          pickedIds.add(t._id);
-          addedThisRound++;
-          svpLog(`✅ [vòng ${round}] Chọn được ${t.zoneName} ${t.label} (${picked.length}/${quantity})`, "green");
+        const gotCount = (res?.pickedLabels || []).length;
+
+        if (gotCount >= quantity) {
+          for (const g of group) { picked.push(g); pickedIds.add(g._id); }
+          gotAdjacentGroup = true;
+          svpLog(`✅ Chọn được cả nhóm ${quantity} ghế liền kề: ${labels}`, "green");
+          break;
         }
+
+        // Hụt (ghế trong nhóm bị người khác giành mất) — nhả selection dở
+        // dang, loại nhóm này khỏi pool rồi thử nhóm liền kề khác.
+        try {
+          await runInPage(function() {
+            const chart = window.seatsio?.charts?.[0];
+            return chart ? chart.clearSelection() : null;
+          });
+        } catch(e) {}
+        for (const g of group) blockedIds.add(g._id);
+        svpLog(`⚠️ Nhóm liền kề #${a} hụt (${gotCount}/${quantity} ghế) — thử nhóm khác`, "yellow");
       }
 
-      if (picked.length >= quantity) break; // đủ rồi
-      if (round === 1 && picked.length === 0) {
-        // Vòng đầu 0 ghế nào cả trong toàn bộ candidate — không có gì để "dò
-        // lại" (không phải do race, mà zone/priority này thực sự hết/bị chặn).
-        // Thoát sớm, xử lý như case "không có ghế nào" bên dưới.
-        svpLog(`🔁 Vòng 1: không chọn được ghế nào trong ${candidates.length} ứng viên.`, "yellow");
-        break;
+      if (!gotAdjacentGroup && !allowSplit) {
+        // Bắt buộc liền kề + không cho mua ghế rời → coi ưu tiên này hết ghế,
+        // loại toàn bộ candidate khỏi remaining, thử ưu tiên/attempt tiếp theo.
+        const triedIds = new Set(candidates.map(t => t._id));
+        remaining = remaining.filter(t => !triedIds.has(t._id));
+        svpLog(`❌ Không tìm được nhóm ${quantity} ghế liền kề nào cho "${reason}" (bắt buộc liền kề, không mua ghế rời). Thử lại...`, "red");
+        continue;
       }
-      if (round < maxRounds) {
-        svpLog(`🔁 Hết vòng ${round}: ${picked.length}/${quantity} ghế — thử lại vòng ${round + 1}/${maxRounds}...`, "yellow");
+    }
+
+    // ── Bước 2: dò từng ghế rời — dùng khi không bắt buộc liền kề, quantity=1,
+    // hoặc Bước 1 hụt nhưng allow_split_seats=true. Đi qua từng ghế theo thứ tự
+    // hàng A→B→C..., ghế nào Seats.io xác nhận trống là chọn ngay, dừng khi đủ
+    // quantity. Lặp tối đa maxRounds vòng phòng dò sót do timing/race.
+    if (!gotAdjacentGroup) {
+      svpLog(`🔎 Quét ${candidates.length} ghế ứng viên (${reason}), cần ${quantity - picked.length} ghế (dò từng ghế${requireAdjacent && quantity > 1 ? ", đã hết cách liền kề — mua rời" : ", không yêu cầu liền kề"})...`, "blue");
+
+      for (round = 1; round <= maxRounds; round++) {
+        if (svpShouldStop()) { svpLog("🛑 Stop signal — abort scan", "yellow"); return false; }
+
+        for (const t of candidates) {
+          if (picked.length >= quantity) break;
+          if (pickedIds.has(t._id)) continue; // đã chọn được ở vòng trước rồi
+          if (svpShouldStop()) { svpLog("🛑 Stop signal — abort scan", "yellow"); return false; }
+
+          let res;
+          try {
+            // clear=true CHỈ ở lần chọn đầu tiên (chưa có ghế nào trên chart),
+            // các lần sau clear=false để cộng dồn, không mất ghế đã chọn.
+            res = await seatsioSelectGroup([labelVariants(t)], true, picked.length === 0);
+          } catch(e) {
+            continue;
+          }
+          const ok = (res?.pickedLabels || []).length > 0;
+          if (ok) {
+            picked.push(t);
+            pickedIds.add(t._id);
+            svpLog(`✅ [vòng ${round}] Chọn được ${t.zoneName} ${t.label} (${picked.length}/${quantity})`, "green");
+          }
+        }
+
+        if (picked.length >= quantity) break; // đủ rồi
+        if (round === 1 && picked.length === 0) {
+          // Vòng đầu 0 ghế nào cả trong toàn bộ candidate — không có gì để "dò
+          // lại" (không phải do race, mà zone/priority này thực sự hết/bị chặn).
+          // Thoát sớm, xử lý như case "không có ghế nào" bên dưới.
+          svpLog(`🔁 Vòng 1: không chọn được ghế nào trong ${candidates.length} ứng viên.`, "yellow");
+          break;
+        }
+        if (round < maxRounds) {
+          svpLog(`🔁 Hết vòng ${round}: ${picked.length}/${quantity} ghế — thử lại vòng ${round + 1}/${maxRounds}...`, "yellow");
+        }
       }
     }
 

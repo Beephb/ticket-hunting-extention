@@ -416,9 +416,14 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/log":
             msg = str(data.get("msg", ""))
             color = str(data.get("color", "white"))
-            logger.info(f"[EXT] {msg}")
+            tag = data.get("tag") or None
+            separator = bool(data.get("separator"))
+            logger.info(f"[EXT]{f'[{tag}]' if tag else ''} {msg}")
             if _app_ref:
-                _app_ref.after(0, lambda m=msg, c=color: _app_ref.add_log(f"[EXT] {m}", c))
+                if separator:
+                    _app_ref.after(0, lambda t=tag: _app_ref.add_log_separator(t))
+                else:
+                    _app_ref.after(0, lambda m=msg, c=color, t=tag: _app_ref.add_log(m, c, t))
             self._send_json(200, {"ok": True})
         elif self.path == "/event":
             # Structured event từ extension svpEvent() → update UI cards
@@ -1054,6 +1059,12 @@ class App(ctk.CTk):
         # mainloop nghẽn dần, gây "Not Responding".
         self._log_queue = []
         self._log_queue_lock = threading.Lock()
+        # Chống spam dòng lặp: log giống hệt liên tiếp (cùng tag, cùng nội dung,
+        # cùng màu) từ 1 tab/slot sẽ KHÔNG tạo dòng mới — chỉ update counter
+        # "(xN)" tại chỗ trên dòng cũ. Rất hay gặp lúc retry chọn ghế (mỗi ~1.8s
+        # 1 dòng y hệt), trước đây làm log_box ngập hàng trăm dòng giống nhau.
+        self._log_dedup = {}    # dedup_key (tag hoặc "_notag_") → {msg,color,count,mark,tag_label}
+        self._dedup_mark_seq = 0
         self.after(100, self._flush_log_queue)
 
         # Build tabs
@@ -1972,26 +1983,83 @@ class App(ctk.CTk):
 
     # ── Log ───────────────────────────────────────────────────────────────────
 
-    def add_log(self, msg, color="white"):
-        ts   = datetime.now().strftime("%H:%M:%S")
-        tag  = color if color in LOG_COLORS else "white"
-        full = f"[{ts}] {msg}\n"
-        # Chỉ đẩy vào queue — KHÔNG đụng widget trực tiếp ở đây. Việc update
-        # UI thật sự do _flush_log_queue() làm theo chu kỳ 100ms, gộp nhiều
-        # dòng lại thành 1 lần thao tác widget (xem comment ở nơi khởi tạo).
+    def add_log(self, msg, color="white", tag_label=None):
+        # CHỈ đẩy dữ liệu thô vào queue — không quyết định dedup ở đây.
+        # (Trước đây add_log() tự so sánh + quyết định dedup ngay khi được gọi,
+        # nhưng add_log() bị gọi từ nhiều lambda self.after(0, ...) xếp hàng bởi
+        # NHIỀU HTTP request thread khác nhau lúc log dồn dập — thứ tự xử lý
+        # không đảm bảo tuyệt đối tuần tự nên state dedup dễ bị đọc/ghi lệch.
+        # Giờ quyết định dedup dời hết vào _flush_log_queue(), vốn đã chạy định
+        # kỳ 100ms qua self.after() trên main thread — đảm bảo tuần tự thật sự.)
+        tag = color if color in LOG_COLORS else "white"
         with self._log_queue_lock:
-            self._log_queue.append((full, tag))
+            self._log_queue.append({"kind": "raw", "msg": msg, "color": tag, "tag_label": tag_label})
         logger.info(msg)
+
+    def add_log_separator(self, tag_label=None):
+        """Đánh dấu ranh giới bắt đầu 1 phiên mới (VD bắt đầu săn ghế) — vẽ 1
+        dòng ngăn cách mảnh thay vì log thường, dễ nhận ra lúc lướt log dài."""
+        with self._log_queue_lock:
+            self._log_queue.append({"kind": "sep", "tag_label": tag_label})
+        logger.info(f"── phiên mới {f'[{tag_label}]' if tag_label else ''} ──")
 
     def _flush_log_queue(self):
         with self._log_queue_lock:
             pending, self._log_queue = self._log_queue, []
         if pending:
             self.log_box.configure(state="normal")
-            for full, tag in pending:
-                start = self.log_box.index("end-1c")
-                self.log_box.insert("end", full)
-                self.log_box.tag_add(tag, start, "end-1c")
+            for item in pending:
+                kind = item["kind"]
+
+                if kind == "raw":
+                    msg, color, tag_label = item["msg"], item["color"], item["tag_label"]
+                    dedup_key = f"tag:{tag_label}" if tag_label else "_notag_"
+                    prev = self._log_dedup.get(dedup_key)
+
+                    if prev and prev["msg"] == msg and prev["color"] == color and prev.get("mark"):
+                        # Y hệt lần trước (cùng tab/slot, cùng nội dung, cùng màu)
+                        # — không thêm dòng mới, chỉ update counter tại chỗ.
+                        prev["count"] += 1
+                        mark = prev["mark"]
+                        try:
+                            line_start = f"{mark} linestart"
+                            line_end = f"{mark} lineend"
+                            prefix = f"[{tag_label}] " if tag_label else ""
+                            ts = datetime.now().strftime("%H:%M:%S")
+                            new_line = f"[{ts}] {prefix}{msg} (x{prev['count']})"
+                            self.log_box.delete(line_start, line_end)
+                            self.log_box.insert(line_start, new_line)
+                            self.log_box.tag_add(color, line_start, f"{mark} lineend")
+                        except Exception:
+                            pass  # dòng gốc có thể đã bị xoá (VD user bấm "Xoá log")
+                        continue
+
+                    # Nội dung mới (hoặc chưa từng thấy tag này) — thêm dòng mới
+                    entry = {"msg": msg, "color": color, "count": 1, "mark": None}
+                    self._log_dedup[dedup_key] = entry
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    prefix = f"[{tag_label}] " if tag_label else ""
+                    full = f"[{ts}] {prefix}{msg}\n"
+                    start = self.log_box.index("end-1c")
+                    self.log_box.insert("end", full)
+                    self.log_box.tag_add(color, start, "end-1c")
+                    # Mark cố định đầu dòng — dùng để tìm lại dòng này khi cần
+                    # update counter "(xN)", kể cả sau khi có dòng khác (của tab
+                    # khác) chen vào bên dưới.
+                    mark = f"__svp_dedup_{self._dedup_mark_seq}"
+                    self._dedup_mark_seq += 1
+                    self.log_box.mark_set(mark, start)
+                    self.log_box.mark_gravity(mark, "left")
+                    entry["mark"] = mark
+
+                elif kind == "sep":
+                    label = item.get("tag_label")
+                    title = f" {label} " if label else " Phiên săn mới "
+                    line = "─" * 6 + title + "─" * 6 + "\n"
+                    start = self.log_box.index("end-1c")
+                    self.log_box.insert("end", line)
+                    self.log_box.tag_add("gray", start, "end-1c")
+
             self.log_box.configure(state="disabled")
             self.log_box.see("end")
         self.after(100, self._flush_log_queue)
@@ -2029,6 +2097,9 @@ class App(ctk.CTk):
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
+        with self._log_queue_lock:
+            self._log_dedup = {}
+            self._log_queue = []
 
     def _on_close(self):
         try:

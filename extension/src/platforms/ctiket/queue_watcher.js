@@ -8,7 +8,9 @@
 // window.watchCtiketQueue duoc export de runner.js goi khi SPA nav sang /queue.
 
 const _CK_BOOKING_TOKEN_KEY = "__svp_ck_booking_token__";
-const _CK_POLL_INTERVAL_MS  = 2000;
+const _CK_POLL_INTERVAL_MS  = 900; // giam tu 2000ms — detect people_ahead=0 nhanh hon,
+                                    // danh doi: nhieu request hon (~2.2x), chap nhan duoc
+                                    // vi endpoint enter() nhe, khong phai API tranh mua truc tiep.
 
 let _ckWatching = false;
 
@@ -24,6 +26,8 @@ function _ckExtractIds() {
   return { eventId, ocid };
 }
 
+// Tra ve { ok, jwt, status } thay vi chi jwt|null — de watchLoop phan biet duoc
+// loi mang/qua tai (timeout, 5xx) voi that su chua dang nhap (401/403).
 async function _ckWhoami() {
   try {
     const res = await fetch("https://cticket.vn/sessions/whoami?tokenize_as=jwt", {
@@ -31,10 +35,12 @@ async function _ckWhoami() {
       headers: { "Accept": "application/json, text/plain, */*" },
       signal: AbortSignal.timeout(6000),
     });
-    if (!res.ok) return null;
+    if (!res.ok) return { ok: false, status: res.status };
     const data = await res.json();
-    return data?.tokenized || null;
-  } catch { return null; }
+    return { ok: true, jwt: data?.tokenized || null, status: res.status };
+  } catch (e) {
+    return { ok: false, status: 0, error: e.message }; // 0 = network error/timeout, khong phai auth
+  }
 }
 
 function _ckGetCaptchaToken() {
@@ -83,6 +89,17 @@ function _ckDecodeJwtExp(jwt) {
   } catch { return null; }
 }
 
+// Tim button chuyen trang sau khi pass queue. Uu tien id (on dinh nhat, khong doi
+// theo build nhu class hash CSS-in-JS kieu "b1rq0yli b1kojs1a"), fallback theo text,
+// fallback cuoi la class cu (phong khi Ctiket lai doi id).
+function _ckFindQueueButton() {
+  return document.querySelector("#queue-footer-button-go-to-buy")
+    || [...document.querySelectorAll("button")].find(b =>
+         /chuy[eê]n \u0111[eế]n trang mua v[eé]|v[aà]o mua v[eé] ngay|ti[eế]p t[uụ]c/i.test(b.textContent)
+       )
+    || document.querySelector("button.btn.btn-primary");
+}
+
 async function watchLoop() {
   if (_ckWatching) return;
   _ckWatching = true;
@@ -96,10 +113,27 @@ async function watchLoop() {
 
   svpLog(`Ctiket queue_watcher: bat dau — eventId=${eventId} ocid=${ocid || "?"}`, "blue");
 
-  // JWT TTL ~7 ngay — lay 1 lan dung suot
-  const jwt = await _ckWhoami();
+  // JWT TTL ~7 ngay — lay 1 lan dung suot. Retry vai lan neu loi do server qua tai
+  // (5xx/timeout) — chi that su dung han khi la loi auth ro rang (401/403).
+  const WHOAMI_MAX_RETRIES = 8;
+  let jwt = null;
+  for (let i = 0; i < WHOAMI_MAX_RETRIES; i++) {
+    const r = await _ckWhoami();
+    if (r.ok && r.jwt) { jwt = r.jwt; break; }
+    if (r.status === 401 || r.status === 403) {
+      svpLog(`Ctiket queue_watcher: chua dang nhap (status=${r.status}) — can dang nhap Google truoc`, "red");
+      _ckWatching = false;
+      return;
+    }
+    svpLog(
+      `Ctiket queue_watcher: whoami loi (status=${r.status || 0}${r.error ? ", " + r.error : ""}) — ` +
+      `co the do server qua tai, thu lai (${i + 1}/${WHOAMI_MAX_RETRIES})...`,
+      "yellow"
+    );
+    await new Promise(res => setTimeout(res, _CK_POLL_INTERVAL_MS));
+  }
   if (!jwt) {
-    svpLog("Ctiket queue_watcher: chua login — can dang nhap Google truoc", "red");
+    svpLog(`Ctiket queue_watcher: whoami that bai lien tuc sau ${WHOAMI_MAX_RETRIES} lan thu — dung lai. Thu F5 lai trang.`, "red");
     _ckWatching = false;
     return;
   }
@@ -154,10 +188,14 @@ async function watchLoop() {
     const clicked = await (async () => {
       const deadline = Date.now() + 10000;
       while (Date.now() < deadline) {
-        const btn = document.querySelector('button.btn.btn-primary');
+        const btn = _ckFindQueueButton();
         if (btn) {
           svpLog(`Ctiket queue_watcher: click button "${btn.textContent.trim()}"`, "green");
-          window.__svp_queue_passed__ = true;  // runner.js doc khi SPA nav sang /buy
+          // Chi bao "queue_passed" (cho phep auto-chon-ghe o buy page) neu day la
+          // mode full-hunt (autoSeat=true, tuc _CK_BOOKING... hunt_done flag co san).
+          // Mode hunt-only (chi flag rieng __svp_ck_queue_only__) → qua duoc queue
+          // nhung KHONG duoc trigger auto-chon-ghe, dung y dinh "chi san ve".
+          window.__svp_queue_passed__ = !!sessionStorage.getItem("__svp_hunt_done__");
           btn.click();
           return true;
         }

@@ -15,6 +15,15 @@ const CONFIG_POLL_MS = 3000;
 const WATCHDOG_ALARM_NAME = "svp_poll_watchdog";
 let _lastPollAt = 0;
 
+// ── Cho phép content script (ISOLATED world) đọc/ghi chrome.storage.session ──
+// Mặc định storage.session chỉ truy cập được từ trusted context (background/SW).
+// queue_watcher.js (1zone) cần lưu zones cache preload trong lúc chờ queue, nên
+// phải nâng access level lên TRUSTED_AND_UNTRUSTED_CONTEXTS. Không await —
+// không chặn phần khởi động còn lại của service worker.
+chrome.storage.session
+  .setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" })
+  .catch(err => console.error("[SVP] setAccessLevel storage.session lỗi:", err));
+
 // ── Hunt-all version cache ────────────────────────────────────────────────────
 // Mỗi Chrome profile có chrome.storage.local RIÊNG, nên mỗi extension instance
 // tự nhớ version cuối đã xử lý — không đụng nhau giữa các profile.
@@ -298,6 +307,15 @@ function _configForTab(tabId) {
   return { ..._cachedConfig, auto_seat: slot.auto_seat };
 }
 
+// Nhãn slot dễ đọc cho 1 tab, dùng để gắn tag vào log gửi về app desktop
+// (VD "Slot 2 · Ghế B") — null nếu tab đang dùng config chung, không có slot riêng.
+function _slotLabelForTab(tabId) {
+  const slotIdx = _tabSlot.get(tabId);
+  if (slotIdx == null || slotIdx < 0 || slotIdx >= _cachedSlots.length) return null;
+  const slot = _cachedSlots[slotIdx];
+  return slot?.name || `Slot ${slotIdx + 1}`;
+}
+
 // ── Inject content scripts vào tab ───────────────────────────────────────────
 
 async function injectTab(tabId, url) {
@@ -312,6 +330,32 @@ async function injectTab(tabId, url) {
   if (_injected.get(tabId) === url) {
     console.log(`[BG] Tab ${tabId} đã inject cho ${url.slice(0,50)} — skip`);
     return;
+  }
+
+  // _injected chỉ lưu trong RAM của service worker — nếu SW bị Chrome kill/
+  // restart giữa chừng (rất dễ xảy ra lúc tải cao khi đang săn), Map này mất
+  // sạch, và background tưởng tab CHƯA inject nên bơm lại cả bộ file vào 1
+  // trang ĐANG SỐNG → các file có `const`/`let` top-level (VD `seat_map.js`)
+  // bị lỗi "Identifier ... has already been declared", các file dùng
+  // function/IIFE thì log lặp lại. Để chắc chắn, hỏi thẳng chính trang (nơi
+  // giữ trạng thái thật, không phụ thuộc SW còn sống hay không) trước khi bơm.
+  try {
+    const [{ result: alreadyInjected }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        if (window.__SVP_BG_GUARD__) return true;
+        window.__SVP_BG_GUARD__ = true;
+        return false;
+      },
+    });
+    if (alreadyInjected) {
+      console.log(`[BG] Tab ${tabId} thực ra ĐÃ inject (xác nhận từ trang, cache RAM bị mất do SW restart) — đồng bộ lại, skip`);
+      _injected.set(tabId, url);
+      return;
+    }
+  } catch (e) {
+    // Tab không truy cập được (VD trang nội bộ Chrome) — để executeScript
+    // chính bên dưới tự báo lỗi như cũ, không chặn ở đây.
   }
 
   console.log(`[BG] Inject tab ${tabId}: ${url.slice(0,60)}`);
@@ -432,13 +476,13 @@ async function fetchConfig() {
   return cfg;
 }
 
-async function sendLog(msg, color = "white") {
+async function sendLog(msg, color = "white", tag = null, separator = false) {
   if (!_appOnline) return;
   try {
     await apiFetch("/log", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ msg, color }),
+      body: JSON.stringify({ msg, color, tag, separator }),
       signal: AbortSignal.timeout(1500),
     });
   } catch {}
@@ -580,7 +624,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // Gửi config mới vào tab ngay
       const tabCfg = _configForTab(tabId);
       if (tabCfg) {
-        chrome.tabs.sendMessage(tabId, { type: "CONFIG_UPDATE", config: tabCfg }).catch(() => {});
+        chrome.tabs.sendMessage(tabId, {
+          type: "CONFIG_UPDATE",
+          config: tabCfg,
+          slotLabel: _slotLabelForTab(tabId), // null = đã chuyển về config chung
+        }).catch(() => {});
       }
     }
     sendResponse({ ok: true });
@@ -598,7 +646,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "LOG") {
-    sendLog(msg.msg, msg.color);
+    const tabId = sender?.tab?.id;
+    let tag = tabId != null ? _slotLabelForTab(tabId) : null;
+    if (!tag && sender?.tab?.url) {
+      try { tag = new URL(sender.tab.url).hostname; } catch {}
+    }
+    sendLog(msg.msg, msg.color, tag, !!msg.separator);
   }
 
   if (msg.type === "SVP_GET_CK_TOKEN") {
@@ -713,10 +766,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       // Xóa cache để injectTab không bị skip do dedup
       _injected.delete(tabId);
-      // Clear hunt flag trước khi inject lại — tránh auto chạy seat khi reconnect
+      // Clear hunt flag + 2 cờ guard trên chính trang (__SVP_BG_GUARD__ dùng bởi
+      // check page-truth mới thêm, __SVP_INJECTED__ dùng bởi runner.js) — không
+      // xoá thì Reconnect sẽ bị chính các guard này chặn, coi như vô tác dụng.
       chrome.scripting.executeScript({
         target: { tabId },
-        func: () => { try { sessionStorage.removeItem("__svp_hunt_done__"); } catch {} },
+        func: () => {
+          try { sessionStorage.removeItem("__svp_hunt_done__"); } catch {}
+          delete window.__SVP_BG_GUARD__;
+          delete window.__SVP_INJECTED__;
+        },
       }).catch(() => {}).finally(() => {
         injectTab(tabId, tab.url)
           .then(() => sendResponse({ ok: true }))

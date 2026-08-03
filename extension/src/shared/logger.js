@@ -13,7 +13,10 @@ const SVP_LOG_COLORS = {
 };
 
 // Console log + relay về desktop qua background
-function svpLog(msg, color = "white") {
+// opts.separator=true: đánh dấu đây là mốc bắt đầu 1 phiên (VD bắt đầu săn ghế
+// mới) — app desktop sẽ vẽ 1 dòng ngăn cách thay vì log thường, giúp dễ nhận
+// ra ranh giới giữa các lần chạy khi nhìn log dài.
+function svpLog(msg, color = "white", opts = {}) {
   const clr = SVP_LOG_COLORS[color] || SVP_LOG_COLORS.white;
   try {
     console.log(`%c[SVP] ${msg}`, `color:${clr}; font-weight:bold`);
@@ -29,7 +32,7 @@ function svpLog(msg, color = "white") {
   }
 
   try {
-    chrome.runtime.sendMessage({ type: "LOG", msg: safeMsg, color });
+    chrome.runtime.sendMessage({ type: "LOG", msg: safeMsg, color, separator: !!opts.separator });
   } catch {
     // extension context invalidated
   }

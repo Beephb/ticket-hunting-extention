@@ -239,5 +239,18 @@
     qLog("✅ Queue watcher sẵn sàng", "green");
   }
 
+  // ── Trả lời PING từ popup ────────────────────────────────────────────────
+  // runner.js (nơi xử lý PING bình thường) KHÔNG được inject vào queue.1zone.vn
+  // (background chỉ inject queue_hook_main.js + queue_watcher.js ở đây) →
+  // popup ping không ai trả lời → hiện nhầm "Chưa kết nối" dù bot vẫn đang
+  // chạy đúng, chỉ là đang ở trang chờ hàng đợi. Thêm handler riêng, kèm cờ
+  // `queue: true` để popup phân biệt được với trạng thái connected bình thường.
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg?.type === "PING") {
+      sendResponse({ ok: true, queue: true, phase: _phase });
+      return true;
+    }
+  });
+
   init().catch(e => console.error("[SVP-Q] Init lỗi:", e));
 })();

@@ -625,6 +625,7 @@ async function run1ZoneSeatZone(cfg) {
     const wanted = zoneItems[idx].zone;
     const quantity = zoneItems[idx].quantity;
     svpLog(`🎯 Thử zone ưu tiên ${idx+1}: ${wanted} | SL=${quantity}`, "yellow");
+    window.svpUpdateHuntTarget?.(`${wanted} (SL${quantity})`);
 
     // Tìm zone match
     let zone = matchZone1Z(zones, wanted, quantity);

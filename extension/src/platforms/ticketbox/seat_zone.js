@@ -667,6 +667,7 @@ async function runTicketboxSeatZone(cfg) {
     const target = zoneItem.zone;
     const quantity = zoneItem.quantity;
     svpLog(`🎯 Ưu tiên zone: ${target} | SL=${quantity}`, "yellow");
+    window.svpUpdateHuntTarget?.(`${target} (SL${quantity})`);
 
     // Match zone trên data đã fetch chung của chu kỳ này — không GET lại.
     // subZones: TẤT CẢ sub-zone khớp target (vd "xoay" → XOAY A, XOAY B, XOAY C),

@@ -251,6 +251,7 @@ async function checkContentScript() {
   const url = tab.url || "";
   const isSupportedPage =
     url.includes("ticket.1zone.vn") ||
+    url.includes("queue.1zone.vn")  ||
     url.includes("ticketbox.vn")    ||
     url.includes("cticket.vn");
 
@@ -262,18 +263,27 @@ async function checkContentScript() {
 
   // Ping content script
   let alive = false;
+  let isQueue = false;
   try {
-    alive = await new Promise(resolve => {
+    const res = await new Promise(resolve => {
       chrome.tabs.sendMessage(tab.id, { type: "PING" }, res => {
-        if (chrome.runtime.lastError) resolve(false);
-        else resolve(!!res?.ok);
+        if (chrome.runtime.lastError) resolve(null);
+        else resolve(res);
       });
     });
+    alive   = !!res?.ok;
+    isQueue = !!res?.queue;
   } catch {}
 
   const hostname = new URL(url).hostname;
 
-  if (alive) {
+  if (alive && isQueue) {
+    // Đang ở queue.1zone.vn — bot vẫn chạy bình thường, chỉ chưa vào được
+    // trang mua vé. Không phải "chưa kết nối" nên không hiện nút reconnect.
+    dot.className    = "dot queue";
+    text.textContent = `🟡 Đang chờ hàng đợi — ${hostname}`;
+    btn.style.display = "none";
+  } else if (alive) {
     dot.className    = "dot online";
     text.textContent = `🟢 Đã kết nối — ${hostname}`;
     btn.style.display = "none";

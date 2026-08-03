@@ -29,6 +29,16 @@ const _HUNT_FLAG_TTL = 90 * 60 * 1000; // 90 phút — đủ cover queue dài nh
 // (vd: user tự bấm xem trang chọn vé trên Ticketbox mà không hề mở popup SVP).
 const _RUN_TRIGGERED_KEY = "__svp_run_triggered__";
 
+// Flag rieng: cho phep queue_watcher (Ctiket) kich hoat khi mode "chi san ve"
+// (autoSeat=false) — TACH BIET voi _HUNT_FLAG_KEY vi flag do con duoc dung de
+// gate auto-chon-ghe o buoc sau (xem watchNavigation), khong the dung chung.
+const _CK_QUEUE_ONLY_KEY = "__svp_ck_queue_only__";
+function isCkQueueOnlyActive() {
+  const val = sessionStorage.getItem(_CK_QUEUE_ONLY_KEY);
+  if (!val) return false;
+  return (Date.now() - parseInt(val)) < _HUNT_FLAG_TTL;
+}
+
 let _cfg = null;
 let _running = false;
 
@@ -78,7 +88,20 @@ function isRunTriggered() {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "CONFIG_UPDATE") {
+    const prevSlot = _cfg?._activeSlotLabel;
     _cfg = msg.config;
+    _cfg._activeSlotLabel = msg.slotLabel || null;
+    // Chỉ báo khi slot THỰC SỰ đổi (khác lần trước) — tránh spam mỗi lần
+    // background broadcast lại config định kỳ dù slot không đổi.
+    if (msg.slotLabel !== undefined && msg.slotLabel !== prevSlot) {
+      const label = msg.slotLabel ? `Slot: ${msg.slotLabel}` : "Config chung";
+      svpLog(`🔀 Đã đổi sang ${label} — config mới đã áp dụng`, "blue");
+      showIndicator("🔀 Đã đổi cấu hình", label, "#38bdf8");
+      setTimeout(() => {
+        // Không ghi đè nếu đã có hoạt động khác (hunt/retry) cập nhật indicator sau đó
+        if (document.getElementById("__svp_ititle__")?.textContent === "🔀 Đã đổi cấu hình") hideIndicator();
+      }, 3000);
+    }
     sendResponse({ ok: true });
     return;
   }
@@ -243,6 +266,7 @@ const INDICATOR_ID = "__svp_indicator__";
 let _indicatorInterval = null;
 let _indicatorStartTime = null;
 let _indicatorPollCount = 0;
+let _currentTarget = "—"; // zone/ghế đang thử lúc này — cập nhật live bởi updateHuntTarget()
 
 function _getOrCreateIndicator() {
   let el = document.getElementById(INDICATOR_ID);
@@ -265,6 +289,11 @@ function _getOrCreateIndicator() {
     #${INDICATOR_ID} .si-close{font-size:11px;color:#475569;cursor:pointer;padding:0 2px;}
     #${INDICATOR_ID} .si-close:hover{color:#94a3b8;}
     #${INDICATOR_ID} .si-sub{font-size:10px;color:#64748b;margin-top:3px;line-height:1.4;}
+    #${INDICATOR_ID} .si-stop{
+      display:none;margin-top:8px;width:100%;background:#ef4444;color:#fff;border:none;
+      border-radius:7px;padding:6px 0;font-size:11px;font-weight:600;cursor:pointer;
+    }
+    #${INDICATOR_ID} .si-stop:hover{background:#dc2626;}
   `;
   document.head.appendChild(style);
 
@@ -277,13 +306,22 @@ function _getOrCreateIndicator() {
       <span class="si-close" id="__svp_iclose__">✕</span>
     </div>
     <div class="si-sub" id="__svp_isub__"></div>
+    <button class="si-stop" id="__svp_istop__">Dừng chọn thủ công</button>
   `;
   document.body.appendChild(el);
   document.getElementById("__svp_iclose__")?.addEventListener("click", hideIndicator);
+  document.getElementById("__svp_istop__")?.addEventListener("click", () => {
+    svpRequestStop();
+    svpLog("🛑 User bấm 'Dừng chọn thủ công' trên indicator", "yellow");
+    showStopButton(false);
+  });
   return el;
 }
 
-function showIndicator(title, sub, color) {
+// showStopBtn: hiện/ẩn nút "Dừng chọn thủ công" ngay trong indicator — trước đây
+// nút này chỉ có trên toast riêng ở giữa-trên màn hình (đã gộp về đây, xem
+// lịch sử: 2 nơi hiện trùng lặp y hệt info "chưa chọn được ghế, đang retry").
+function showIndicator(title, sub, color, showStopBtn = false) {
   const el = _getOrCreateIndicator();
   el.style.display = "block";
   el.style.borderColor = (color || "#1e293b") + "88";
@@ -293,6 +331,12 @@ function showIndicator(title, sub, color) {
   if (dot) dot.style.background = color || "#64748b";
   if (t) t.textContent = title;
   if (s) s.textContent = sub || "";
+  showStopButton(showStopBtn);
+}
+
+function showStopButton(visible) {
+  const btn = document.getElementById("__svp_istop__");
+  if (btn) btn.style.display = visible ? "block" : "none";
 }
 
 function hideIndicator() {
@@ -300,12 +344,22 @@ function hideIndicator() {
   if (_indicatorInterval) { clearInterval(_indicatorInterval); _indicatorInterval = null; }
 }
 
+// Gọi bởi platform code (1zone/ticketbox seat_zone.js + seat_map.js) mỗi khi
+// bot chuyển sang thử 1 zone/ghế ưu tiên khác, để indicator hiện đúng zone
+// đang chạy THỰC TẾ thay vì luôn hiện cố định zone ưu tiên #1 lúc mới bắt đầu.
+function updateHuntTarget(label) {
+  _currentTarget = label || "—";
+}
+window.svpUpdateHuntTarget = updateHuntTarget;
+
 function startHuntIndicator(cfg) {
   _indicatorStartTime = Date.now();
   _indicatorPollCount = 0;
   const zp = (_getPlatformCfg(cfg, cfg?.active_platform || "1Zone")?.zone_priority || [])[0];
   // zp có thể là string (khu, seat_zone mode) hoặc object {raw, quantity} (seat_map mode)
-  const zone = (zp && typeof zp === "object") ? (zp.raw || "—") : (zp || "—");
+  // — dùng làm giá trị khởi đầu, sẽ bị updateHuntTarget() ghi đè ngay khi vòng lặp
+  // thật sự bắt đầu thử zone cụ thể.
+  _currentTarget = (zp && typeof zp === "object") ? (zp.raw || "—") : (zp || "—");
   const qty = _getPlatformCfg(cfg, cfg?.active_platform || "1Zone")?.quantity || 1;
   if (_indicatorInterval) clearInterval(_indicatorInterval);
   _indicatorInterval = setInterval(() => {
@@ -314,64 +368,8 @@ function startHuntIndicator(cfg) {
     const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
     const ss = String(elapsed % 60).padStart(2, "0");
     showIndicator("🔴 Đang săn vé...",
-      `Poll #${_indicatorPollCount.toLocaleString()} | ${mm}:${ss} | ${zone} · ${qty} vé`, "#ef4444");
+      `Poll #${_indicatorPollCount.toLocaleString()} | ${mm}:${ss} | ${_currentTarget} · ${qty} vé`, "#ef4444");
   }, 500);
-}
-
-// ── Toast thông báo trên trang ────────────────────────────────────────────────
-
-
-function showSeatRetryToast(mode, attempt) {
-  // Toast retry liên tục — cập nhật tại chỗ, không tạo lại DOM mỗi lần (tránh nhấp nháy)
-  let toast = document.getElementById("__svp_toast__");
-
-  if (!toast) {
-    const style = document.createElement("style");
-    style.textContent = `
-      @keyframes __svp_slide_in {
-        from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
-        to   { opacity: 1; transform: translateX(-50%) translateY(0); }
-      }
-      #__svp_toast__ button:hover { opacity: 0.85; }
-    `;
-    document.head.appendChild(style);
-
-    toast = document.createElement("div");
-    toast.id = "__svp_toast__";
-    toast.style.cssText = `
-      position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
-      z-index: 999999; background: #1a1a2e; border: 2px solid #f97316;
-      border-radius: 12px; padding: 16px 20px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-      display: flex; align-items: center; gap: 14px; min-width: 340px; max-width: 90vw;
-      font-family: -apple-system, 'Segoe UI', sans-serif; animation: __svp_slide_in 0.3s ease;
-    `;
-    toast.innerHTML = `
-      <div style="font-size:28px;line-height:1">⏳</div>
-      <div style="flex:1">
-        <div style="color:#f97316;font-weight:700;font-size:15px;margin-bottom:4px">
-          Chưa chọn được ghế, vẫn đang tiếp tục retry...
-        </div>
-        <div id="__svp_toast_sub__" style="color:#94a3b8;font-size:12px;line-height:1.4">
-          Hết ghế ở các khu ưu tiên. Bot sẽ tự thử lại liên tục.
-        </div>
-      </div>
-      <button id="__svp_btn_close__" style="
-        background:#ef4444;color:#fff;border:none;border-radius:8px;
-        padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;
-        white-space:nowrap;flex-shrink:0;
-      ">Dừng chọn thủ công</button>
-    `;
-    document.body.appendChild(toast);
-
-    document.getElementById("__svp_btn_close__")?.addEventListener("click", () => {
-      svpRequestStop();
-      svpLog("🛑 User bấm 'Dừng chọn thủ công' trên toast retry", "yellow");
-      toast.remove();
-    });
-  }
-
-  const sub = document.getElementById("__svp_toast_sub__");
-  if (sub) sub.textContent = `Lần thử #${attempt} · ${mode} — Bot sẽ tự thử lại liên tục.`;
 }
 
 
@@ -408,7 +406,7 @@ async function maybeRun(force = false) {
   // NOTE: checkAndClearHuntFlag() xoa flag truoc khi goi maybeRun(true),
   // nen phai dung tham so force de bien nguon thay vi doc lai sessionStorage
   if (pageType === "queue_ctiket") {
-    const huntActive = force || !!sessionStorage.getItem(_HUNT_FLAG_KEY);
+    const huntActive = force || !!sessionStorage.getItem(_HUNT_FLAG_KEY) || isCkQueueOnlyActive();
     if (huntActive) {
       svpLog("⏳ Detect trang Ctiket queue — khởi động queue_watcher...", "blue");
       watchLoop?.();
@@ -435,6 +433,7 @@ async function maybeRun(force = false) {
   await sleep(800);
   try {
     svpLog(`🪑 Route: ${platform} + ${mode}`, "blue");
+    svpLog(`🚀 Bắt đầu phiên săn ghế mới`, "blue", { separator: true });
     let seatOk = false;
     let attempt = 0;
     const startUrl = location.href;
@@ -463,26 +462,25 @@ async function maybeRun(force = false) {
 
       // Chưa chọn được — báo + retry liên tục cho tới khi có ghế hoặc user bấm dừng
       svpLog(`⏳ Lần ${attempt}: chưa chọn được ghế, đang retry...`, "yellow");
-      showIndicator("🟠 Chưa có ghế — đang retry...", `Lần thử #${attempt} | ${platform} · ${mode}`, "#f97316");
-      showSeatRetryToast(mode, attempt);
+      showIndicator("🟠 Chưa có ghế — đang retry...", `Lần thử #${attempt} | ${platform} · ${mode}`, "#f97316", true);
 
       if (svpShouldStop()) {
         svpLog("🛑 Dừng chọn ghế theo yêu cầu", "yellow");
         break;
       }
-      const slept = await svpSleep(1800);
+      const slept = await svpSleep(700); // giam tu 1800ms — retry chon zone nhanh hon
+                                          // khi vua het ve tam thoi (anh huong chung ca
+                                          // 1Zone/Ticketbox/Ctiket vi dung chung outer loop nay)
       if (!slept) { svpLog("🛑 Dừng trong lúc chờ retry", "yellow"); break; }
     }
 
     if (!seatOk) {
-      document.getElementById("__svp_toast__")?.remove();
       if (svpShouldStop()) {
         showIndicator("⚪ Đã dừng", "Bạn đã chọn dừng — tự chọn ghế thủ công", "#64748b");
       } else {
         showIndicator("⚠️ Không chọn được ghế", "Trang đã chuyển hoặc lỗi khác", "#ef4444");
       }
     } else {
-      document.getElementById("__svp_toast__")?.remove();
       showIndicator("🟢 Đã vào checkout!", "Đang điền form...", "#22c55e");
       setTimeout(hideIndicator, 5000);
     }
@@ -525,7 +523,7 @@ function watchNavigation() {
       // NOTE: flag co the da bi clear boi checkAndClearHuntFlag() nen
       // dat hunt flag moi truoc khi watchLoop check (chong mat flag)
       if (/\/buy\/[a-zA-Z0-9_-]+\/queue/.test(location.pathname)) {
-        const huntActive = !!sessionStorage.getItem(_HUNT_FLAG_KEY);
+        const huntActive = !!sessionStorage.getItem(_HUNT_FLAG_KEY) || isCkQueueOnlyActive();
         if (huntActive) {
           svpLog("⏳ SPA nav → Ctiket queue — khởi động queue_watcher...", "blue");
           setTimeout(() => watchLoop?.(), 800);
