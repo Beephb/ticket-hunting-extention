@@ -39,12 +39,7 @@ jobs:
           mkdir -p release
           cp -R extension release/extension
           cp -R dist/SanVePro.app release/SanVePro.app
-          cat > "release/Chay lan dau - bam vao day.command" << 'SCRIPT'
-#!/bin/bash
-cd "$(dirname "$0")"
-xattr -cr "SanVePro.app"
-open "SanVePro.app"
-SCRIPT
+          printf '%s\n' '#!/bin/bash' 'cd "$(dirname "$0")"' 'xattr -cr "SanVePro.app"' 'open "SanVePro.app"' > "release/Chay lan dau - bam vao day.command"
           chmod +x "release/Chay lan dau - bam vao day.command"
           cd release
           ditto -c -k --sequesterRsrc --keepParent . ../SanVePro-macOS.zip
