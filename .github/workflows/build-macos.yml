@@ -6,6 +6,7 @@ on:
     branches: [ main ]
     paths:
       - 'app/**'
+      - 'extension/**'
       - 'SanVePro_mac.spec'
       - '.github/workflows/build-macos.yml'
 
@@ -38,6 +39,13 @@ jobs:
           mkdir -p release
           cp -R extension release/extension
           cp -R dist/SanVePro.app release/SanVePro.app
+          cat > "release/Chay lan dau - bam vao day.command" << 'SCRIPT'
+#!/bin/bash
+cd "$(dirname "$0")"
+xattr -cr "SanVePro.app"
+open "SanVePro.app"
+SCRIPT
+          chmod +x "release/Chay lan dau - bam vao day.command"
           cd release
           ditto -c -k --sequesterRsrc --keepParent . ../SanVePro-macOS.zip
 
